@@ -1,0 +1,18 @@
+/AGENTS.override.md
+/temp/
+# 실제 환경 값과 백업은 제외하고, 빈 값으로 된 공개 샘플만 허용한다.
+.env
+.env.*
+!.env.example
+# 비밀키·인증서 키 저장소 및 별도 자격 증명 보관 위치
+*.key
+*.pem
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+/secrets/
+/credentials/
+# 호스팅 도구의 로컬 연결 정보와 내려받은 환경 설정
+.vercel/
