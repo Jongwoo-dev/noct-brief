@@ -1,0 +1,8 @@
+[Unit]
+Description=NOCT Brief daily backup (proposed UTC schedule)
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+[Install]
+WantedBy=timers.target

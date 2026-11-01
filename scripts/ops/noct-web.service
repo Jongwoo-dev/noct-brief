@@ -1,0 +1,22 @@
+[Unit]
+Description=NOCT Brief web
+After=network.target postgresql.service
+[Service]
+Type=simple
+User=noct
+Group=noct
+WorkingDirectory=/opt/noct/current
+EnvironmentFile=/etc/noct/environment
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3000
+ExecStart=/usr/local/bin/node .next/standalone/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/noct/current/.next
+UMask=0077
+[Install]
+WantedBy=multi-user.target

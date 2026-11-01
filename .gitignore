@@ -16,3 +16,9 @@
 /credentials/
 # 호스팅 도구의 로컬 연결 정보와 내려받은 환경 설정
 .vercel/
+node_modules/
+.next/
+coverage/
+*.tsbuildinfo
+.local/
+dist/

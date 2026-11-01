@@ -1,0 +1,539 @@
+import "./env";
+import pg from "pg";
+import { randomUUID } from "node:crypto";
+import assert from "node:assert/strict";
+import { readConfig } from "../lib/config";
+import { migrate } from "./migrate";
+import { Repository, type Job } from "../lib/repository";
+import { Worker } from "../lib/worker";
+import { sampleContent } from "../data/samples";
+import {
+  ProviderError,
+  type Collector,
+  type Generator,
+} from "../lib/providers";
+import { drainNotifications } from "../lib/notifications";
+import { assertDatabase } from "../lib/db";
+import { pgTool } from "./ops/pg-tools";
+const c = readConfig();
+if (c.APP_ENV !== "local" || c.DATA_MODE !== "sample" || !c.DATABASE_URL)
+  throw new Error("npm run db:local로 전용 로컬 DB를 준비하세요.");
+const name = `noct_test_${randomUUID().replaceAll("-", "")}_local`,
+  url = new URL(c.DATABASE_URL);
+url.pathname = "/postgres";
+const admin = new pg.Pool({ connectionString: url.toString() });
+await admin.query(`CREATE DATABASE "${name}"`);
+url.pathname = `/${name}`;
+const db = new pg.Pool({ connectionString: url.toString(), max: 8 });
+let checks = 0;
+const check = (label: string) => {
+  checks++;
+  console.log(`PASS ${label}`);
+};
+const config: Job["config"] = {
+  mode: "sample",
+  model: "sample",
+  reasoning: "medium",
+  maxOutputTokens: 8000,
+  promptVersion: "noct-v1",
+};
+const repo = new Repository(db, "sample");
+const now = () => new Date(Date.now() + 5000);
+function providers(date: string, session: "pre" | "post", pending = false) {
+  const content = sampleContent(date, session);
+  let submits = 0;
+  const collector: Collector = {
+    async collect(job, coverage) {
+      job.payload.content = structuredClone(content);
+      return {
+        ...structuredClone(content.bundle),
+        coverageStart: new Date(
+          Math.min(
+            Date.parse(coverage),
+            Date.parse(content.bundle.coverageStart),
+          ),
+        ).toISOString(),
+        pendingCalls: pending ? ["가상 기업 콜"] : [],
+      };
+    },
+    async refresh(_job, bundle) {
+      return bundle;
+    },
+  };
+  const generator: Generator = {
+    async submit() {
+      submits++;
+      return { id: "resp_sample" };
+    },
+    async poll() {
+      return { status: "done", draft: content.draft, usage: { sample: true } };
+    },
+  };
+  return { collector, generator, submits: () => submits };
+}
+async function finish(w: Worker, start: Date, steps = 6) {
+  for (let i = 0; i < steps; i++)
+    await w.tick(new Date(start.getTime() + i * 16000));
+}
+try {
+  await migrate(db, "local");
+  await migrate(db, "local");
+  await assertDatabase(db, "local");
+  await assert.rejects(() => assertDatabase(db, "production"));
+  check("마이그레이션 재실행과 환경 표식");
+  await Promise.all(
+    Array.from({ length: 5 }, () =>
+      repo.enqueue("2026-10-23", "pre", config, now()),
+    ),
+  );
+  assert.equal(
+    (await db.query("SELECT count(*) FROM jobs")).rows[0].count,
+    "1",
+  );
+  check("중복 예약 유일 제약");
+  const p = providers("2026-10-23", "pre"),
+    w = new Worker(repo, p.collector, p.generator);
+  await finish(w, now());
+  assert.equal((await repo.publicList()).length, 1);
+  assert.equal(p.submits(), 1);
+  check("수집→생성→검증→트랜잭션 공개");
+  const original = (await repo.publicDetail("2026-10-23-pre"))!;
+  assert.ok(original);
+  const command = {
+    id: randomUUID(),
+    briefingId: original.id,
+    baseVersion: original.versionId,
+    action: "hide" as const,
+  };
+  await repo.adminCommand(command, config, now());
+  assert.equal(await repo.publicDetail(original.id), null);
+  assert.equal((await repo.publicList()).length, 0);
+  await assert.rejects(
+    () => repo.adminCommand(command, config, now()),
+    /COMMAND_REPLAY/,
+  );
+  await repo.adminCommand(
+    { ...command, id: randomUUID(), action: "restore" },
+    config,
+    now(),
+  );
+  assert.ok(await repo.publicDetail(original.id));
+  check("비공개 목록·직접 조회 차단, 복구와 명령 재실행 방지");
+  await repo.adminCommand(
+    {
+      ...command,
+      id: randomUUID(),
+      action: "correct",
+      reason: "샘플 오류 검증",
+      issue: "제목의 표현",
+      evidenceUrl: "https://example.com/noct-sample",
+    },
+    config,
+    now(),
+  );
+  assert.equal(
+    (await repo.publicDetail(original.id))!.versionId,
+    original.versionId,
+  );
+  const correction = providers("2026-10-23", "pre");
+  const cg: Generator = {
+    ...correction.generator,
+    async poll() {
+      return {
+        status: "done",
+        draft: {
+          ...original.content.draft,
+          title: "근거를 재확인한 정정 제목",
+        },
+      };
+    },
+  };
+  await finish(new Worker(repo, correction.collector, cg), now());
+  const revised = (await repo.publicDetail(original.id))!;
+  assert.notEqual(revised.versionId, original.versionId);
+  assert.equal(
+    revised.content.bundle.cutoffAt,
+    original.content.bundle.cutoffAt,
+  );
+  assert.equal(revised.corrections.length, 1);
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*) FROM briefing_versions WHERE briefing_id=$1",
+        [original.id],
+      )
+    ).rows[0].count,
+    "2",
+  );
+  await assert.rejects(
+    () =>
+      repo.adminCommand(
+        { ...command, id: randomUUID(), action: "hide" },
+        config,
+        now(),
+      ),
+    /VERSION_CONFLICT/,
+  );
+  check("정정 중 원본 유지·불변 버전·자료 기준 유지·동시 수정 충돌");
+  await repo.enqueue("2026-10-23", "post", config, now());
+  const claimed = await Promise.all([
+    repo.claim("a", now()),
+    repo.claim("b", now()),
+  ]);
+  assert.equal(claimed.filter(Boolean).length, 1);
+  const stale = claimed.find(Boolean)!;
+  await db.query(
+    "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",
+    [stale.id],
+  );
+  const fresh = (await repo.claim("c", now()))!;
+  await assert.rejects(() => repo.save(stale, "failed", now()), /LEASE_LOST/);
+  await repo.save(fresh, "failed", now());
+  check("동시 작업자 단일 잠금·만료 후 fencing");
+  await repo.enqueue("2026-10-22", "post", config, now());
+  const unknown = providers("2026-10-22", "post");
+  unknown.generator.submit = async () => {
+    throw new ProviderError("SUBMISSION_UNKNOWN", false, 0, true);
+  };
+  await new Worker(repo, unknown.collector, unknown.generator).tick(now());
+  assert.equal(
+    (
+      await db.query(
+        "SELECT error_code FROM jobs WHERE briefing_id='2026-10-22-post'",
+      )
+    ).rows[0].error_code,
+    "SUBMISSION_UNKNOWN",
+  );
+  await assert.rejects(
+    () =>
+      repo.adminCommand(
+        {
+          id: randomUUID(),
+          action: "retry",
+          briefingId: "2026-10-22-post",
+          baseVersion: "",
+        },
+        config,
+        now(),
+      ),
+    /RETRY_NOT_AVAILABLE/,
+  );
+  check("외부 접수 불명 자동·수동 중복 요청 차단");
+  await repo.enqueue("2026-10-22", "pre", config, now());
+  const retry = providers("2026-10-22", "pre");
+  retry.generator.submit = async () => {
+    throw new ProviderError("HTTP_429", true, 180);
+  };
+  const rw = new Worker(repo, retry.collector, retry.generator);
+  await rw.tick(now());
+  let r = (
+    await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-22-pre'")
+  ).rows[0];
+  assert.equal(r.state, "retry_wait");
+  assert.equal(r.attempt, 1);
+  assert.ok(r.next_at.getTime() > Date.now() + 175000);
+  for (let i = 0; i < 3; i++) {
+    await rw.tick(new Date(r.next_at.getTime() + 1000));
+    r = (
+      await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-22-pre'")
+    ).rows[0];
+  }
+  assert.equal(r.state, "failed");
+  check("429 Retry-After·최대 세 번 재시도·영구 실패");
+  // Move only this test slot's target into the future to exercise early-ready publication and the waiting deadline against the real DB clock.
+  await repo.enqueue("2026-10-21", "post", config, now());
+  const wait = providers("2026-10-21", "post", true);
+  const waiting = new Worker(repo, wait.collector, wait.generator);
+  const target = new Date(Date.now() + 3600000);
+  await db.query(
+    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-21-post'",
+    [target],
+  );
+  await waiting.tick(now());
+  r = (await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-21-post'"))
+    .rows[0];
+  assert.equal(r.state, "waiting_data");
+  assert.equal(wait.submits(), 0);
+  await waiting.detectDelays(new Date(target.getTime() + 20 * 60000));
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*) FROM notification_outbox WHERE briefing_id='2026-10-21-post'",
+      )
+    ).rows[0].count,
+    "0",
+  );
+  await waiting.tick(new Date(target.getTime() + 61 * 60000));
+  await finish(waiting, new Date(target.getTime() + 62 * 60000));
+  const limited = (await repo.publicDetail("2026-10-21-post"))!;
+  assert.ok(
+    limited.content.bundle.missing.some((s) => s.includes("콜 자료 미반영")),
+  );
+  assert.equal(wait.submits(), 1);
+  check("콜 대기·무변경 재생성 억제·장애 알림 제외·한 시간 후 축소 공개");
+  await repo.enqueue("2026-10-20", "pre", config, now());
+  const early = providers("2026-10-20", "pre"),
+    ew = new Worker(repo, early.collector, early.generator);
+  const future = new Date(Date.now() + 3600000);
+  await db.query(
+    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-20-pre'",
+    [future],
+  );
+  await finish(ew, now(), 4);
+  assert.equal(await repo.publicDetail("2026-10-20-pre"), null);
+  await ew.tick(new Date(future.getTime() + 1000));
+  assert.ok(await repo.publicDetail("2026-10-20-pre"));
+  check("미리 준비된 글의 목표 시각 이전 노출 방지");
+  await assert.rejects(() =>
+    db.query("UPDATE briefing_versions SET reason='changed' WHERE id=$1", [
+      original.versionId,
+    ]),
+  );
+  await repo.enqueue("2026-10-19", "pre", config, now());
+  const repair = providers("2026-10-19", "pre");
+  const invalidDraft = structuredClone(
+    sampleContent("2026-10-19", "pre").draft,
+  );
+  invalidDraft.summary[0].text = "근거 없는 수치 987654321";
+  repair.generator.poll = async () => ({ status: "done", draft: invalidDraft });
+  await finish(new Worker(repo, repair.collector, repair.generator), now(), 10);
+  assert.equal(repair.submits(), 2);
+  assert.equal(
+    (await repo.publicDetail("2026-10-19-pre"))!.content.reduced,
+    true,
+  );
+  check("DB 버전 불변 제약·한 번 보정 후 검증 실패 축소본 공개");
+  await repo.enqueue("2026-10-16", "pre", config, now());
+  const update = providers("2026-10-16", "pre");
+  const first = update.collector.collect;
+  update.collector.collect = async (...args) => ({
+    ...(await first(...args)),
+    missing: ["확인 중인 자료"],
+  });
+  let refreshed = false;
+  update.collector.refresh = async (_job, bundle) => {
+    if (refreshed) return bundle;
+    refreshed = true;
+    return { ...bundle, missing: ["갱신 확인 후에도 미확보한 자료"] };
+  };
+  await finish(new Worker(repo, update.collector, update.generator), now(), 12);
+  assert.equal(update.submits(), 2);
+  assert.deepEqual(
+    (await repo.publicDetail("2026-10-16-pre"))!.content.bundle.missing,
+    ["갱신 확인 후에도 미확보한 자료"],
+  );
+  check("누락 자료가 있는 글도 공개 직전 변경 자료 반영");
+  await repo.notify(original.id, "test", "가상 실패 알림", now());
+  await repo.notify(original.id, "test", "가상 실패 알림", now());
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*) FROM notification_outbox WHERE dedupe_key=$1",
+        [`${original.id}:test`],
+      )
+    ).rows[0].count,
+    "1",
+  );
+  let calls = 0;
+  const request: typeof fetch = async () => {
+    calls++;
+    return Response.json({ ok: true });
+  };
+  await drainNotifications(db, c, request, now());
+  assert.equal(calls, 0);
+  const prod = {
+    ...c,
+    APP_ENV: "production" as const,
+    TELEGRAM_ENABLED: true,
+    TELEGRAM_BOT_TOKEN: "test-only",
+    TELEGRAM_CHAT_ID: "test-only",
+  };
+  await drainNotifications(db, prod, request, new Date(Date.now() + 86400000));
+  assert.ok(calls > 0);
+  check("예외 알림 중복 억제·로컬 발송 차단·모의 전송");
+  // Public archive fixtures are written only to this test-created isolated database.
+  const archiveDates = [
+    "2026-11-16",
+    "2026-11-17",
+    "2026-11-18",
+    "2026-11-19",
+    "2026-11-20",
+    "2026-11-23",
+    "2026-11-24",
+  ];
+  for (const date of archiveDates) {
+    for (const session of ["pre", "post"] as const) {
+      const slot = await repo.ensureSlot(date, session);
+      const version = randomUUID();
+      await db.query(
+        "INSERT INTO briefing_versions(id,briefing_id,content,created_at,config,validated) VALUES($1,$2,$3,$4,$5,true)",
+        [version, slot.id, sampleContent(date, session), slot.targetAt, config],
+      );
+      await db.query(
+        "UPDATE briefings SET current_version_id=$1,visible=true,published_at=$2 WHERE id=$3",
+        [version, slot.targetAt, slot.id],
+      );
+    }
+  }
+  const firstDays = await repo.publicList({
+    dateWindow: { limit: 6, offset: 0 },
+  });
+  const nextDay = await repo.publicList({
+    dateWindow: { limit: 1, offset: 6 },
+  });
+  assert.equal(firstDays.length, 12);
+  assert.equal(new Set(firstDays.map((b) => b.content.date)).size, 6);
+  assert.deepEqual(
+    nextDay.map((b) => b.id),
+    ["2026-11-16-pre", "2026-11-16-post"],
+  );
+  assert.equal(new Set([...firstDays, ...nextDay].map((b) => b.id)).size, 14);
+  const preDays = await repo.publicList({
+    session: "pre",
+    dateWindow: { limit: 6, offset: 0 },
+  });
+  assert.equal(preDays.length, 6);
+  assert.ok(preDays.every((b) => b.content.session === "pre"));
+  assert.equal(
+    (
+      await repo.publicList({
+        date: "2026-11-24",
+        dateWindow: { limit: 7, offset: 0 },
+      })
+    ).length,
+    2,
+  );
+  const featuredId = (await repo.publicList({ limit: 1 }))[0].id;
+  assert.equal(featuredId, "2026-11-24-post");
+  const archiveWithoutFeatured = await repo.publicList({
+    excludeId: featuredId,
+    dateWindow: { limit: 6, offset: 0 },
+  });
+  const nextWithoutFeatured = await repo.publicList({
+    excludeId: featuredId,
+    dateWindow: { limit: 1, offset: 6 },
+  });
+  assert.equal(archiveWithoutFeatured.length, 11);
+  assert.equal(archiveWithoutFeatured[0].id, "2026-11-24-pre");
+  assert.deepEqual(
+    nextWithoutFeatured.map((b) => b.id),
+    ["2026-11-16-pre", "2026-11-16-post"],
+  );
+  const archiveIds = [...archiveWithoutFeatured, ...nextWithoutFeatured].map(
+    (b) => b.id,
+  );
+  assert.equal(new Set(archiveIds).size, 13);
+  assert.ok(!archiveIds.includes(featuredId));
+  const postWithoutFeatured = await repo.publicList({
+    session: "post",
+    excludeId: featuredId,
+    dateWindow: { limit: 6, offset: 0 },
+  });
+  assert.deepEqual(
+    postWithoutFeatured.map((b) => b.content.date),
+    [
+      "2026-11-23",
+      "2026-11-20",
+      "2026-11-19",
+      "2026-11-18",
+      "2026-11-17",
+      "2026-11-16",
+    ],
+  );
+  assert.equal(
+    (
+      await repo.publicList({
+        date: "2026-11-24",
+        session: "post",
+        excludeId: featuredId,
+        dateWindow: { limit: 7, offset: 0 },
+      })
+    ).length,
+    0,
+  );
+  assert.equal(
+    (await repo.publicList({ excludeId: featuredId, limit: 1 }))[0].id,
+    "2026-11-24-pre",
+  );
+  check("메인 회차 제외·같은 날 이전 회차 유지·제외 후 거래일 페이지 계산");
+  await db.query(
+    "UPDATE briefings SET visible=false WHERE id='2026-11-24-pre'",
+  );
+  const unvalidatedVersion = randomUUID();
+  await db.query(
+    "INSERT INTO briefing_versions(id,briefing_id,content,created_at,config,validated) VALUES($1,'2026-11-24-post',$2,now(),$3,false)",
+    [unvalidatedVersion, sampleContent("2026-11-24", "post"), config],
+  );
+  await db.query(
+    "UPDATE briefings SET current_version_id=$1 WHERE id='2026-11-24-post'",
+    [unvalidatedVersion],
+  );
+  const publicDays = await repo.publicList({
+    dateWindow: { limit: 6, offset: 0 },
+  });
+  assert.equal(publicDays.length, 12);
+  assert.ok(publicDays.every((b) => b.content.date !== "2026-11-24"));
+  assert.equal(
+    (
+      await repo.publicList({
+        date: "2026-11-24",
+        dateWindow: { limit: 7, offset: 0 },
+      })
+    ).length,
+    0,
+  );
+  check("거래일 페이지 경계·세션/날짜 필터·비공개 및 미검증 버전 제외");
+  // Export and restore actual PostgreSQL data into a separate empty database.
+  const { execFile } = await import("node:child_process"),
+    { promisify } = await import("node:util"),
+    { mkdir } = await import("node:fs/promises"),
+    { resolve, dirname } = await import("node:path");
+  await mkdir("temp/work", { recursive: true });
+  const file = resolve(`temp/work/${name}.dump`);
+  const pgEnv = {
+    ...process.env,
+    PGHOST: url.hostname,
+    PGPORT: url.port,
+    PGUSER: decodeURIComponent(url.username),
+    PGPASSWORD: decodeURIComponent(url.password),
+    PGDATABASE: name,
+  };
+  await promisify(execFile)(
+    pgTool("pg_dump"),
+    ["-Fc", "--no-owner", "--no-acl", "-f", file],
+    { env: pgEnv },
+  );
+  const restored = `${name}_restored`;
+  await admin.query(`CREATE DATABASE "${restored}"`);
+  await promisify(execFile)(
+    pgTool("pg_restore"),
+    [
+      "--exit-on-error",
+      "--single-transaction",
+      "--no-owner",
+      "--no-acl",
+      "-d",
+      restored,
+      file,
+    ],
+    { env: pgEnv },
+  );
+  const ru = new URL(url);
+  ru.pathname = `/${restored}`;
+  const restoredDb = new pg.Pool({ connectionString: ru.toString() });
+  assert.equal(
+    (await restoredDb.query("SELECT count(*) FROM briefing_versions")).rows[0]
+      .count,
+    (await db.query("SELECT count(*) FROM briefing_versions")).rows[0].count,
+  );
+  await restoredDb.end();
+  await admin.query(`DROP DATABASE "${restored}"`);
+  check("실제 pg_dump와 분리 DB pg_restore 후 버전 수 일치");
+  console.log(
+    `Integration: ${checks} checks passed (local PostgreSQL; external services mocked).`,
+  );
+} finally {
+  await db.end();
+  await admin.query(`DROP DATABASE "${name}"`);
+  await admin.end();
+}
