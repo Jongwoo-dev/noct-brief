@@ -53,6 +53,22 @@ export class ResponsesGenerator implements Generator {
       );
     }
     if (!response.ok) {
+      if (response.status === 429) {
+        const billingError = z
+          .object({
+            error: z.object({
+              code: z.enum([
+                "organization_spend_limit_exceeded",
+                "project_spend_limit_exceeded",
+                "organization_usage_limit_exceeded",
+                "credit_balance_exhausted",
+              ]),
+            }),
+          })
+          .safeParse(await response.json().catch(() => null));
+        if (billingError.success)
+          throw new ProviderError(billingError.data.error.code.toUpperCase());
+      }
       const after = response.headers.get("retry-after");
       const seconds = after
         ? Number.isFinite(Number(after))

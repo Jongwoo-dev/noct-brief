@@ -2,7 +2,8 @@ import { it, expect, vi } from "vitest";
 import { ResponsesGenerator } from "../lib/providers";
 import { readConfig } from "../lib/config";
 import { sampleContent } from "../data/samples";
-import type { Job } from "../lib/repository";
+import type { Job, Repository } from "../lib/repository";
+import { Worker } from "../lib/worker";
 const config = readConfig({
   EXTERNAL_CALLS_ENABLED: "true",
   DATA_MODE: "live",
@@ -74,6 +75,90 @@ it("429와 Retry-After 구분", async () => {
   await expect(
     new ResponsesGenerator(config, request).submit(job, content.bundle),
   ).rejects.toMatchObject({ retryable: true, retryAfterSeconds: 180 });
+});
+it.each([
+  "organization_spend_limit_exceeded",
+  "project_spend_limit_exceeded",
+  "organization_usage_limit_exceeded",
+  "credit_balance_exhausted",
+])("%s는 제출·결과 조회 모두 자동 재시도하지 않음", async (code) => {
+  const request = vi
+    .fn()
+    .mockImplementation(async () =>
+      Response.json(
+        { error: { code, message: "do not retain provider message" } },
+        { status: 429, headers: { "Retry-After": "180" } },
+      ),
+    );
+  const generator = new ResponsesGenerator(config, request);
+  for (const operation of [
+    () => generator.submit(job, content.bundle),
+    () => generator.poll("resp_fake"),
+  ])
+    await expect(operation()).rejects.toMatchObject({
+      code: code.toUpperCase(),
+      message: code.toUpperCase(),
+      retryable: false,
+      ambiguous: false,
+      retryAfterSeconds: 0,
+    });
+  expect(request).toHaveBeenCalledTimes(2);
+});
+it("일시 호출 제한의 JSON 응답은 Retry-After를 유지", async () => {
+  const request = vi
+    .fn()
+    .mockResolvedValue(
+      Response.json(
+        { error: { code: "rate_limit_exceeded" } },
+        { status: 429, headers: { "Retry-After": "180" } },
+      ),
+    );
+  await expect(
+    new ResponsesGenerator(config, request).poll("resp_fake"),
+  ).rejects.toMatchObject({
+    code: "HTTP_429",
+    retryable: true,
+    retryAfterSeconds: 180,
+  });
+});
+it("비용 한도 응답은 작업 실패로 보존하고 재시도를 예약하지 않음", async () => {
+  const now = new Date("2026-10-27T00:00:00Z");
+  const runningJob = {
+    ...job,
+    briefing_id: "test-briefing",
+    target_at: new Date("2026-10-26T23:30:00Z"),
+    state: "generating",
+    attempt: 0,
+    payload: { responseId: "resp_fake" },
+  };
+  const repo = {
+    claim: vi.fn().mockResolvedValue(runningJob),
+    save: vi.fn(),
+    notify: vi.fn(),
+  };
+  const request = vi
+    .fn()
+    .mockResolvedValue(
+      Response.json(
+        { error: { code: "project_spend_limit_exceeded" } },
+        { status: 429 },
+      ),
+    );
+  const worker = new Worker(
+    repo as unknown as Repository,
+    { collect: vi.fn(), refresh: vi.fn() },
+    new ResponsesGenerator(config, request),
+  );
+  expect(await worker.tick(now)).toBe("processed");
+  expect(repo.save).toHaveBeenCalledExactlyOnceWith(
+    runningJob,
+    "failed",
+    now,
+    runningJob.payload,
+    "PROJECT_SPEND_LIMIT_EXCEEDED",
+  );
+  expect(repo.notify).toHaveBeenCalledOnce();
+  expect(request).toHaveBeenCalledOnce();
 });
 it("거부·불완전 응답은 초안으로 사용하지 않음", async () => {
   for (const response of [
