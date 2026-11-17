@@ -294,6 +294,7 @@ export class Repository {
       reason?: string;
       issue?: string;
       evidenceUrl?: string;
+      jobId?: string;
     },
     config: Job["config"],
     now: Date,
@@ -309,8 +310,12 @@ export class Repository {
           command.briefingId,
         ])
       ).rows[0];
+      if (!b) throw new Error("BRIEFING_NOT_FOUND");
       if (command.action === "hide" || command.action === "restore") {
-        if (b.current_version_id !== command.baseVersion)
+        if (
+          !b.current_version_id ||
+          b.current_version_id !== command.baseVersion
+        )
           throw new Error("VERSION_CONFLICT");
         if (command.action === "restore") {
           const v = (
@@ -327,17 +332,71 @@ export class Repository {
           b.id,
         ]);
       } else if (command.action === "retry") {
-        const r = await tx.query(
-          "UPDATE jobs SET state=CASE WHEN payload ? 'responseId' THEN 'generating' WHEN payload ? 'content' THEN 'validating' ELSE 'collecting' END,attempt=0,error_code=NULL,next_at=$2 WHERE briefing_id=$1 AND state='failed' AND error_code IS DISTINCT FROM 'SUBMISSION_UNKNOWN'",
-          [b.id, now],
+        if ((b.current_version_id ?? "") !== command.baseVersion)
+          throw new Error("VERSION_CONFLICT");
+        const latest = (
+          await tx.query(
+            "SELECT * FROM jobs WHERE briefing_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
+            [b.id],
+          )
+        ).rows[0];
+        if (command.jobId && latest?.id !== command.jobId)
+          throw new Error("JOB_CONFLICT");
+        if (
+          !latest ||
+          latest.state !== "failed" ||
+          latest.error_code === "SUBMISSION_UNKNOWN"
+        )
+          throw new Error("RETRY_NOT_AVAILABLE");
+        if (
+          latest.kind === "correction" &&
+          latest.payload.baseVersion !== b.current_version_id
+        )
+          throw new Error("VERSION_CONFLICT");
+        if (
+          (
+            await tx.query(
+              "SELECT 1 FROM jobs WHERE briefing_id=$1 AND state NOT IN ('failed','published') LIMIT 1",
+              [b.id],
+            )
+          ).rowCount
+        )
+          throw new Error("ACTIVE_JOB");
+        // A stored original report is not a newly generated correction. Without a response,
+        // resume collection instead of accidentally validating/publishing the old content.
+        await tx.query(
+          "UPDATE jobs SET state=CASE WHEN payload ? 'responseId' THEN 'generating' ELSE 'collecting' END,attempt=0,error_code=NULL,next_at=$2,owner=NULL,lease_until=NULL WHERE id=$1",
+          [latest.id, now],
         );
-        if (!r.rowCount) throw new Error("RETRY_NOT_AVAILABLE");
       } else {
         if (
           !b.current_version_id ||
           b.current_version_id !== command.baseVersion
         )
           throw new Error("VERSION_CONFLICT");
+        if (
+          !command.issue?.trim() ||
+          !command.reason?.trim() ||
+          !command.evidenceUrl
+        )
+          throw new Error("EVIDENCE_REQUIRED");
+        if (
+          (
+            await tx.query(
+              "SELECT 1 FROM jobs WHERE briefing_id=$1 AND state NOT IN ('failed','published') LIMIT 1",
+              [b.id],
+            )
+          ).rowCount
+        )
+          throw new Error("ACTIVE_JOB");
+        const latest = (
+          await tx.query(
+            "SELECT error_code FROM jobs WHERE briefing_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE",
+            [b.id],
+          )
+        ).rows[0];
+        if (latest?.error_code === "SUBMISSION_UNKNOWN")
+          throw new Error("SUBMISSION_UNKNOWN");
         const old = (
           await tx.query("SELECT content FROM briefing_versions WHERE id=$1", [
             b.current_version_id,

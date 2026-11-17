@@ -59,6 +59,32 @@ assert.equal((await fetch(`${base}/api/health`)).status, 200);
 const admin = await fetch(`${base}/admin`);
 const body = await admin.text();
 assert.doesNotMatch(body, /실패 작업 재시도|정정 요청 저장/);
+const privateDetail = await fetch(`${base}/admin/briefings/2026-10-27-pre`, {
+  redirect: "manual",
+});
+if (privateDetail.status === 307) {
+  assert.ok(privateDetail.headers.get("location")?.endsWith("/admin"));
+} else {
+  assert.equal(privateDetail.status, 200);
+  const redirectBody = await privateDetail.text();
+  assert.match(redirectBody, /NEXT_REDIRECT;replace;\/admin;307;/);
+  assert.doesNotMatch(
+    redirectBody,
+    /보관된 보고서 내용|실패 작업 재시도|정정 요청 저장/,
+  );
+}
+const preview = await fetch(`${base}/admin/preview`);
+assert.equal(preview.status, 200);
+assert.match(await preview.text(), /관리자 화면 시연/);
+const sampleCommand = await fetch(`${base}/api/admin/sample`, {
+  method: "POST",
+  headers: {
+    origin: "http://localhost:3000",
+    "content-type": "application/json",
+  },
+  body: JSON.stringify({ action: "step" }),
+});
+assert.equal(sampleCommand.status, 403);
 console.log(
   "HTTP: home, icons and brand assets, empty filter, missing detail, cross-origin, forged session, disabled scheduler, health, admin gate passed.",
 );

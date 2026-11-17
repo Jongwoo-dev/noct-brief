@@ -15,6 +15,7 @@ import {
 import { drainNotifications } from "../lib/notifications";
 import { assertDatabase } from "../lib/db";
 import { pgTool } from "./ops/pg-tools";
+import { adminDetail, adminOverview } from "../lib/admin-queries";
 const c = readConfig();
 if (c.APP_ENV !== "local" || c.DATA_MODE !== "sample" || !c.DATABASE_URL)
   throw new Error("npm run db:local로 전용 로컬 DB를 준비하세요.");
@@ -175,6 +176,132 @@ try {
     /VERSION_CONFLICT/,
   );
   check("정정 중 원본 유지·불변 버전·자료 기준 유지·동시 수정 충돌");
+  const stored = (await adminDetail(db, original.id, original.versionId))!;
+  assert.equal(stored.versions.length, 2);
+  assert.equal(
+    stored.selected!.content.draft.title,
+    original.content.draft.title,
+  );
+  await repo.adminCommand(
+    { ...command, id: randomUUID(), baseVersion: revised.versionId },
+    config,
+    now(),
+  );
+  assert.equal(await repo.publicDetail(original.id), null);
+  assert.equal(
+    (await adminOverview(db, "stored", "2026-10-23", 1)).editions[0].visible,
+    false,
+  );
+  assert.equal(
+    (await adminDetail(db, original.id))!.selected!.id,
+    revised.versionId,
+  );
+  assert.equal(
+    (await adminDetail(db, original.id, randomUUID()))!.selected,
+    null,
+  );
+  check("관리자 비공개 보관본·이전 버전 조회와 회차별 버전 제한");
+  const correctionCommand = {
+    id: randomUUID(),
+    action: "correct" as const,
+    briefingId: original.id,
+    baseVersion: revised.versionId,
+    issue: "가상 정정 재시도 검증",
+    reason: "검사 전용",
+    evidenceUrl: "https://example.com/noct-sample",
+  };
+  await repo.adminCommand(correctionCommand, config, now());
+  const failedCorrection = (await adminDetail(db, original.id))!.edition.job!
+    .id;
+  await db.query(
+    "UPDATE jobs SET state='failed',error_code='CORRECTION_EVIDENCE_REQUIRED' WHERE id=$1",
+    [failedCorrection],
+  );
+  await repo.adminCommand(
+    {
+      id: randomUUID(),
+      action: "retry",
+      briefingId: original.id,
+      baseVersion: revised.versionId,
+      jobId: failedCorrection,
+    },
+    config,
+    now(),
+  );
+  assert.equal(
+    (await adminDetail(db, original.id))!.edition.job!.state,
+    "collecting",
+  );
+  await assert.rejects(
+    () =>
+      repo.adminCommand(
+        { ...correctionCommand, id: randomUUID() },
+        config,
+        now(),
+      ),
+    /ACTIVE_JOB/,
+  );
+  await db.query("UPDATE jobs SET state='failed' WHERE id=$1", [
+    failedCorrection,
+  ]);
+  await repo.adminCommand(
+    { ...correctionCommand, id: randomUUID() },
+    config,
+    new Date(now().getTime() + 1000),
+  );
+  const newest = (await adminDetail(db, original.id))!.edition.job!.id;
+  await db.query("UPDATE jobs SET state='failed' WHERE id=$1", [newest]);
+  await assert.rejects(
+    () =>
+      repo.adminCommand(
+        {
+          id: randomUUID(),
+          action: "retry",
+          briefingId: original.id,
+          baseVersion: revised.versionId,
+          jobId: failedCorrection,
+        },
+        config,
+        now(),
+      ),
+    /JOB_CONFLICT/,
+  );
+  await repo.adminCommand(
+    {
+      id: randomUUID(),
+      action: "retry",
+      briefingId: original.id,
+      baseVersion: revised.versionId,
+      jobId: newest,
+    },
+    config,
+    now(),
+  );
+  assert.equal(
+    (await db.query("SELECT state FROM jobs WHERE id=$1", [failedCorrection]))
+      .rows[0].state,
+    "failed",
+  );
+  const resumed = providers("2026-10-23", "pre");
+  await finish(new Worker(repo, resumed.collector, resumed.generator), now());
+  assert.equal(resumed.submits(), 1);
+  assert.equal(await repo.publicDetail(original.id), null);
+  const afterRetry = (await adminDetail(db, original.id))!;
+  assert.equal(afterRetry.versions.length, 3);
+  assert.equal(afterRetry.edition.visible, false);
+  await repo.adminCommand(
+    {
+      ...command,
+      id: randomUUID(),
+      action: "restore",
+      baseVersion: afterRetry.edition.version,
+    },
+    config,
+    now(),
+  );
+  check(
+    "최신 실패 작업만 재개·원본 재발행 방지·중복 정정 차단·정정 후 비공개 유지",
+  );
   await repo.enqueue("2026-10-23", "post", config, now());
   const claimed = await Promise.all([
     repo.claim("a", now()),
