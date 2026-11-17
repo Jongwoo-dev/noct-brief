@@ -19,6 +19,7 @@ export function LoginButton() {
             const result = await authClient.signIn.social({
               provider: "google",
               callbackURL: "/admin",
+              errorCallbackURL: "/admin?error=oauth",
             });
             if (result.error) throw new Error();
           } catch {

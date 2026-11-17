@@ -16,8 +16,17 @@ export function getAuth() {
       google: {
         clientId: c.GOOGLE_CLIENT_ID,
         clientSecret: c.GOOGLE_CLIENT_SECRET,
+        disableDefaultScope: true,
+        scope: ["openid", "email", "profile"],
+        accessType: "online",
+        includeGrantedScopes: false,
+        prompt: "select_account",
         mapProfileToUser: async (profile) => {
-          if (c.ADMIN_GOOGLE_SUB && profile.sub !== c.ADMIN_GOOGLE_SUB)
+          if (
+            !profile.sub ||
+            !profile.email_verified ||
+            (c.ADMIN_GOOGLE_SUB && profile.sub !== c.ADMIN_GOOGLE_SUB)
+          )
             throw new APIError("FORBIDDEN", {
               message: "관리자 계정만 허용됩니다.",
             });
@@ -29,7 +38,10 @@ export function getAuth() {
         },
       },
     },
-    account: { accountLinking: { enabled: false } },
+    account: {
+      accountLinking: { enabled: false },
+      encryptOAuthTokens: true,
+    },
     session: {
       expiresIn: 60 * 60 * 8,
       updateAge: 60 * 60,
@@ -40,9 +52,10 @@ export function getAuth() {
   return (instance ??= betterAuth(options));
 }
 export async function identity(headers: Headers) {
+  const c = readConfig();
   const auth = getAuth();
   if (!auth) return null;
-  await assertDatabase(pool(), readConfig().APP_ENV);
+  await assertDatabase(pool(), c.APP_ENV, c.DATA_MODE);
   const session = await auth.api.getSession({ headers });
   if (!session) return null;
   const result = await pool().query(
@@ -53,9 +66,7 @@ export async function identity(headers: Headers) {
   return sub
     ? {
         sub,
-        admin:
-          !!readConfig().ADMIN_GOOGLE_SUB &&
-          readConfig().ADMIN_GOOGLE_SUB === sub,
+        admin: !!c.ADMIN_GOOGLE_SUB && c.ADMIN_GOOGLE_SUB === sub,
       }
     : null;
 }

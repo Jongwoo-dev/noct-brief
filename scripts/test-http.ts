@@ -1,6 +1,7 @@
 import "./env";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readConfig, authConfigured } from "../lib/config";
 const base = process.env.TEST_BASE_URL ?? "http://127.0.0.1:3000";
 const parsed = new URL(base);
 if (!["127.0.0.1", "localhost"].includes(parsed.hostname))
@@ -59,6 +60,58 @@ assert.equal((await fetch(`${base}/api/health`)).status, 200);
 const admin = await fetch(`${base}/admin`);
 const body = await admin.text();
 assert.doesNotMatch(body, /실패 작업 재시도|정정 요청 저장/);
+const config = readConfig();
+if (authConfigured(config)) {
+  const authOrigin = new URL(config.BETTER_AUTH_URL).origin;
+  if (new URL(admin.url).origin !== authOrigin)
+    assert.ok(body.includes(`NEXT_REDIRECT;replace;${authOrigin}/admin;307;`));
+  const canonicalAdmin = await fetch(`${authOrigin}/admin`);
+  assert.match(await canonicalAdmin.text(), /Google로 로그인/);
+  for (const headers of [
+    { origin: "https://foreign.example", "content-type": "application/json" },
+    { "content-type": "application/json" },
+    { origin: authOrigin, "content-type": "text/plain" },
+  ]) {
+    const rejectedLogin = await fetch(`${base}/api/auth/sign-in/social`, {
+      method: "POST",
+      headers: headers as Record<string, string>,
+      body: JSON.stringify({ provider: "google", callbackURL: "/admin" }),
+    });
+    assert.equal(rejectedLogin.status, 403);
+  }
+  const login = await fetch(`${authOrigin}/api/auth/sign-in/social`, {
+    method: "POST",
+    headers: { origin: authOrigin, "content-type": "application/json" },
+    body: JSON.stringify({
+      provider: "google",
+      callbackURL: "/admin",
+      errorCallbackURL: "/admin?error=oauth",
+      disableRedirect: true,
+    }),
+  });
+  assert.equal(login.status, 200);
+  const target = new URL((await login.json()).url);
+  assert.equal(target.origin, "https://accounts.google.com");
+  assert.equal(
+    target.searchParams.get("redirect_uri"),
+    `${authOrigin}/api/auth/callback/google`,
+  );
+  assert.deepEqual(target.searchParams.get("scope")?.split(" ").sort(), [
+    "email",
+    "openid",
+    "profile",
+  ]);
+  assert.equal(target.searchParams.get("access_type"), "online");
+  assert.equal(target.searchParams.get("code_challenge_method"), "S256");
+  assert.ok(target.searchParams.get("state"));
+  assert.ok(target.searchParams.get("code_challenge"));
+  assert.match(login.headers.get("set-cookie") ?? "", /HttpOnly/i);
+  const failedLogin = await fetch(`${authOrigin}/admin?error=oauth`);
+  assert.match(await failedLogin.text(), /로그인을 완료하지 못했습니다/);
+  console.log(
+    "HTTP: canonical login origin, OAuth scopes/PKCE/state/HttpOnly and foreign-origin rejection passed (Google redirect not followed).",
+  );
+}
 const privateDetail = await fetch(`${base}/admin/briefings/2026-10-27-pre`, {
   redirect: "manual",
 });

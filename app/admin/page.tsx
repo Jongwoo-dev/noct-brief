@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { headers } from "next/headers";
+import { redirect } from "next/navigation";
 import { identity, getAuth } from "@/lib/auth";
-import { readConfig } from "@/lib/config";
+import { readConfig, authConfigured } from "@/lib/config";
 import { runtime } from "@/lib/runtime";
 import { adminOverview } from "@/lib/admin-queries";
 import { adminSearch } from "@/lib/admin";
@@ -19,7 +20,14 @@ export default async function Admin({
 }) {
   const c = readConfig(),
     sample = c.APP_ENV === "local" && c.DATA_MODE === "sample";
-  const user = await identity(await headers());
+  const requestHeaders = await headers();
+  if (
+    authConfigured(c) &&
+    requestHeaders.get("host") !== new URL(c.BETTER_AUTH_URL).host
+  )
+    redirect(new URL("/admin", c.BETTER_AUTH_URL).toString());
+  const params = await searchParams;
+  const user = await identity(requestHeaders);
   if (!user)
     return (
       <main id="main" className="home admin-login">
@@ -30,6 +38,12 @@ export default async function Admin({
           <br />
           등록된 운영자 Google 계정으로 로그인해 주세요.
         </p>
+        {typeof params.error === "string" && (
+          <p role="alert">
+            로그인을 완료하지 못했습니다. 등록된 Google 계정으로 다시 시도해
+            주세요.
+          </p>
+        )}
         {getAuth() ? (
           <LoginButton />
         ) : (
@@ -62,7 +76,7 @@ export default async function Admin({
         <SignOut />
       </main>
     );
-  const { filter, date, page } = adminSearch(await searchParams),
+  const { filter, date, page } = adminSearch(params),
     { db } = await runtime();
   return (
     <AdminDashboard

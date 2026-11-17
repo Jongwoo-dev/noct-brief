@@ -3,6 +3,9 @@ const config: NextConfig = {
   agentRules: false,
   output: "standalone",
   poweredByHeader: false,
+  logging: {
+    incomingRequests: { ignore: [/^\/api\/auth\/callback\//] },
+  },
   async headers() {
     return [
       {
