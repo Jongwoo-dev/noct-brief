@@ -26,18 +26,24 @@ function Status({ edition }: { edition: AdminEdition }) {
   return (
     <div className="admin-statuses">
       <span className={`admin-status ${edition.visible ? "is-public" : ""}`}>
-        {edition.version
+        {edition.missedAt
           ? edition.visible
-            ? "공개 중"
-            : "비공개 보관"
-          : "미발행"}
+            ? "미발행 안내 공개"
+            : "미발행 안내 비공개"
+          : edition.version
+            ? edition.visible
+              ? "공개 중"
+              : "비공개 보관"
+            : "미발행"}
       </span>
       {edition.job && (
         <span
           className={`admin-status ${edition.job.state === "failed" ? "needs-attention" : ""}`}
         >
           {edition.job.kind === "correction" ? "정정 · " : ""}
-          {stateLabels[edition.job.state]}
+          {edition.missedAt && edition.job.errorCode === "EDITION_SUPERSEDED"
+            ? "마감"
+            : stateLabels[edition.job.state]}
         </span>
       )}
     </div>
@@ -256,6 +262,7 @@ export function AdminDashboard({
                     {
                       failed: "작업 실패",
                       delay: "발행 지연",
+                      missed_editions: "미발행 회차 마감",
                       backup: "DB 백업 실패",
                       backup_stale: "DB 백업 26시간 미갱신",
                       submission_unknown: "접수 확인 필요",
@@ -515,7 +522,11 @@ export function AdminEditionDetail({
               ))}
             </ol>
           ) : (
-            <p>검증·발행을 마치면 여기에 보관됩니다.</p>
+            <p>
+              {edition.missedAt
+                ? `미발행 마감 · ${kst(edition.missedAt)} KST`
+                : "검증·발행을 마치면 여기에 보관됩니다."}
+            </p>
           )}
           {!preview && edition.visible && (
             <Link className="admin-open" href={`/briefings/${edition.id}`}>
@@ -560,9 +571,11 @@ export function AdminEditionDetail({
           <StoredReport version={selected} />
         </>
       ) : (
-        <div className="admin-empty">
-          저장된 보고서가 없습니다. 현재 처리 상태를 확인해 주세요.
-        </div>
+        !edition.missedAt && (
+          <div className="admin-empty">
+            저장된 보고서가 없습니다. 현재 처리 상태를 확인해 주세요.
+          </div>
+        )
       )}
     </main>
   );

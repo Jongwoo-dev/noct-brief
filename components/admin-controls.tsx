@@ -108,9 +108,13 @@ export function AdminControls({
             ? "재시도를 예약했습니다. 다음 처리에서 이어집니다."
             : action === "correct"
               ? "정정 요청을 저장했습니다. 수정본 검증 전까지 현재 보고서는 유지됩니다."
-              : action === "hide"
-                ? "비공개로 전환했습니다. 보고서와 이력은 보관됩니다."
-                : "보관된 현재 보고서를 다시 공개했습니다.",
+              : edition.missedAt
+                ? action === "hide"
+                  ? "미발행 안내를 숨겼습니다."
+                  : "미발행 안내를 다시 공개했습니다."
+                : action === "hide"
+                  ? "비공개로 전환했습니다. 보고서와 이력은 보관됩니다."
+                  : "보관된 현재 보고서를 다시 공개했습니다.",
         );
         setConfirm(false);
         router.refresh();
@@ -154,9 +158,13 @@ export function AdminControls({
       {confirm && (
         <div className="admin-confirm">
           <p>
-            {edition.visible
-              ? "목록과 직접 주소에서 이 보고서를 숨깁니다. 저장된 내용과 정정 이력은 남습니다."
-              : "보관된 현재 버전을 다시 공개합니다. 새 보고서를 생성하지 않습니다."}
+            {edition.missedAt
+              ? edition.visible
+                ? "이 회차의 미발행 안내를 목록과 직접 주소에서 숨깁니다."
+                : "이 회차의 미발행 안내를 다시 공개합니다."
+              : edition.visible
+                ? "목록과 직접 주소에서 이 보고서를 숨깁니다. 저장된 내용과 정정 이력은 남습니다."
+                : "보관된 현재 버전을 다시 공개합니다. 새 보고서를 생성하지 않습니다."}
           </p>
           <div className="button-row">
             <button

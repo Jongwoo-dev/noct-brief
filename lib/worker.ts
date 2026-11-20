@@ -147,6 +147,18 @@ export class Worker {
         ];
         bundle.pendingCalls = [];
       }
+      if (
+        job.kind === "initial" &&
+        job.config.mode === "live" &&
+        (!bundle.sources.length ||
+          bundle.sources.some(
+            (s) =>
+              s.rights !== "approved" ||
+              s.method === "sample" ||
+              Date.parse(s.publishedAt) > Date.parse(bundle.cutoffAt),
+          ))
+      )
+        throw new ProviderError("EDITION_EVIDENCE_UNAVAILABLE");
       // Persist the submission boundary before sending a billable request. A crash here needs operator reconciliation.
       await this.repo.markSubmitting(job);
       const result = await this.generator.submit(job, bundle);
@@ -222,7 +234,7 @@ export class Worker {
       `INSERT INTO notification_outbox(id,dedupe_key,briefing_id,kind,message,next_at)
        SELECT gen_random_uuid(),b.id || ':delay',b.id,'delay','목표 시각 이후 기술적 발행 지연이 이어지고 있습니다.',$1
        FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial'
-       WHERE b.published_at IS NULL AND b.target_at <= $1::timestamptz - interval '15 minutes'
+       WHERE b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at <= $1::timestamptz - interval '15 minutes'
          AND (j.state IS DISTINCT FROM 'waiting_data' OR b.target_at <= $1::timestamptz - interval '1 hour')
          AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.dedupe_key=b.id || ':delay')
        ON CONFLICT (dedupe_key) DO NOTHING`,

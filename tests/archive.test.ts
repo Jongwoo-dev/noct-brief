@@ -1,18 +1,20 @@
 import { describe, expect, it } from "vitest";
-import { archivePage } from "../lib/archive";
+import { archivePage, archiveEntry } from "../lib/archive";
 import { samples } from "../data/samples";
 
 function editions() {
   return [16, 17, 18, 19, 20, 23, 24].flatMap((day, i) =>
-    (["post", "pre"] as const).map((session) => ({
-      ...samples[0],
-      id: `day-${i}-${session}`,
-      content: {
-        ...samples[0].content,
-        date: `2026-11-${day}`,
-        session,
-      },
-    })),
+    (["post", "pre"] as const)
+      .map((session) => ({
+        ...samples[0],
+        id: `day-${i}-${session}`,
+        content: {
+          ...samples[0].content,
+          date: `2026-11-${day}`,
+          session,
+        },
+      }))
+      .map(archiveEntry),
   );
 }
 
@@ -29,7 +31,7 @@ describe("거래일별 아카이브", () => {
     ]);
     expect(
       result.days.every(
-        (d) => d.briefings.map((b) => b.content.session).join() === "pre,post",
+        (d) => d.briefings.map((b) => b.session).join() === "pre,post",
       ),
     ).toBe(true);
   });
@@ -47,7 +49,7 @@ describe("거래일별 아카이브", () => {
     expect(new Set(ids).size).toBe(rows.length);
   });
   it("한 세션이나 일부 회차만 있어도 가짜 항목을 만들지 않는다", () => {
-    const rows = editions().filter((b) => b.content.session === "pre");
+    const rows = editions().filter((b) => b.session === "pre");
     const result = archivePage(rows);
     expect(result.days).toHaveLength(6);
     expect(result.days.every((d) => d.briefings.length === 1)).toBe(true);

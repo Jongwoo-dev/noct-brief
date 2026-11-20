@@ -14,13 +14,13 @@
 
 Linux 빌드 환경에서 `npm ci`, `npm run typecheck`, `npm test`, `npm run build`, `npm run release:package`를 수행한다. 실제 DB 검증은 별도 로컬 테스트 DB에서 수행한다. Windows 산출물은 Linux 배포용이 아니다.
 
-생성된 묶음을 새 `/opt/noct/releases/릴리스명`에 배치하고 해당 디렉터리에서 `npm ci --omit=dev`를 실행한다. worker용 tsx는 운영 의존성이다. standalone 웹 서버와 별도로 작업 스크립트·마이그레이션·정적 파일이 있어야 한다. 릴리스에는 환경 파일·DB 파일·비밀 자료를 포함하지 않으며 manifest를 확인한다.
+생성된 묶음을 새 `/opt/noct/releases/릴리스명`에 배치하고 해당 디렉터리에서 `npm ci --omit=dev`를 실행한다. 마이그레이션과 백업·복원 스크립트는 tsx를 사용한다. standalone 웹 서버와 별도로 작업 스크립트·마이그레이션·정적 파일이 있어야 한다. 릴리스에는 환경 파일·DB 파일·비밀 자료를 포함하지 않으며 manifest를 확인한다.
 
 최초 운영 마이그레이션은 비밀 환경을 로드한 상태에서 `CONFIRM_PRODUCTION_MIGRATION=production npm run db:migrate`로 실행한다. 기존 운영 DB 변경 시 먼저 외부 백업을 확인하고 되돌릴 수 없는 스키마 변경을 구별한다. 마이그레이션은 체크섬·DB advisory lock으로 중복 실행을 막고 환경·데이터 모드 표식을 확인한다.
 
-`noct-web.service`, `noct-worker.service/timer`, `noct-backup.service/timer`를 systemd에 설치한다. 환경 경로·Node 경로·파일 소유권을 확인하고 daemon-reload 후 승인된 서비스만 시작한다. `RELEASE=/opt/noct/releases/릴리스명 bash scripts/ops/deploy.sh`는 current 심볼릭 링크를 전환하고 health 실패 시 이전 앱 릴리스를 복구한다. DB 스키마를 자동으로 되돌리지는 않는다. worker를 잠시 멈춘 뒤 호환 스키마/앱을 적용하고 재개한다.
+`noct-web.service`와 일일 DB 백업용 `noct-backup.service/timer`를 systemd에 설치한다. 환경 경로·Node 경로·파일 소유권을 확인하고 daemon-reload 후 승인된 서비스만 시작한다. `RELEASE=/opt/noct/releases/릴리스명 bash scripts/ops/deploy.sh`는 current 심볼릭 링크를 전환하고 health 실패 시 이전 앱 릴리스를 복구한다. DB 스키마를 자동으로 되돌리지는 않는다. 호환 스키마를 먼저 적용한다. 자동 발행을 중지할 때는 서버 설정의 AUTO_PUBLISH_ENABLED를 false로 바꾸고 웹 프로세스를 재시작한다.
 
-분 단위 worker timer는 저장된 다음 실행 시각·90초 lease·fence로 중복을 제어한다. 외부 스케줄러를 선택하면 POST `/api/internal/tick`에 별도 Bearer CRON_SECRET을 사용한다. 자동 실행은 production/live에서만 허용한다. 두 방식을 동시에 활성화할 필요는 없다.
+운영 웹 프로세스가 시작되면 Next.js가 발행 작업을 한 번 등록한다. 활성화한 경우 즉시 한 번, 이후 1분마다 DB의 다음 실행 시각을 확인한다. 실행 중인 작업은 90초 lease와 fence를 사용한다. 개발 서버에서는 샘플을 수동으로 시험한다.
 
 보안 패치 자동 적용은 초기 제안이며 설정과 재부팅 시간을 검토한다. Node·앱 의존성·DB 메이저 버전은 릴리스 검사·백업·복원 확인 후 갱신한다. 정규 발행 작업과 겹치는 재부팅을 피한다. 4GB에서의 실제 메모리·빌드 부하·트래픽은 아직 측정하지 않았으므로 서버에서 빌드한다는 전제를 두지 않는다.
 
@@ -38,7 +38,7 @@ timer 초기 제안은 매일 UTC 07:00, 최대 2분 분산이다. BACKUP_BUCKET
 
 ## 운영 상태와 복구
 
-예약 처리기가 정상 종료하면 `last_scheduler`에 실행 시작 시각을 기록한다. 중단 후 재실행하면 기존 작업에서 이어가며, 저장된 시각이 없으면 최근 12시간부터 탐색한다. 새로 탐색하는 범위는 최대 31일이다. 알림 대기열은 발송 실패 후 1·5·15분에 재시도한다. 네 번째 실패는 관리자 목록의 「예외 알림」에서 발송 실패로 확인한다.
+예약 처리기가 정상 종료하면 `last_scheduler`에 실행 시작 시각을 기록한다. 중단 후 재실행하면 기존 작업에서 이어가며, 저장된 시각이 없으면 최근 12시간부터 탐색한다. 새로 탐색하는 범위는 최대 31일이다. 발행 예정 시각이 지난 최신 회차만 재개하고 앞선 미발행 회차는 안내로 마감한다. 재시작 당시 이미 알려진 외부 응답 ID는 회수하고 접수 여부가 불명확한 요청은 관리자가 확인한다. 미발행 안내는 같은 점검에서 마감한 건수를 묶어 한 번 알린다. 알림 대기열은 발송 실패 후 1·5·15분에 재시도한다. 네 번째 실패는 관리자 목록의 「예외 알림」에서 발송 실패로 확인한다.
 
 - `/admin`: 회차 상태, 다음 처리, 오류 코드, 누락, 사용량, 정정·재시도·비공개·복구. Google sub 허용 목록과 서버 세션 검사를 적용한다.
 - `SUBMISSION_UNKNOWN`: API 접수 여부 불명. 공급자 기록을 확인해 기존 response ID를 회수하거나 미접수임을 확인하기 전 재요청하지 않는다. 무조건 재실행 버튼은 차단한다. 해당 복구 조정은 운영자 확인 후 DB 작업으로 처리하며 자동 추측하지 않는다.

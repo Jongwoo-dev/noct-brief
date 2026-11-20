@@ -6,15 +6,137 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import pg from "pg";
 import type { Config } from "../lib/config";
-import { dueSlots } from "../lib/calendar";
+import { dueSlots, schedule } from "../lib/calendar";
 import { assertDatabase } from "../lib/db";
 import { adminOverview } from "../lib/admin-queries";
 import { checkBackupAge, drainNotifications } from "../lib/notifications";
-import { Repository } from "../lib/repository";
+import { Repository, type Job } from "../lib/repository";
 import { backupDatabase } from "./ops/backup";
 
 const exec = promisify(execFile);
 type Check = (label: string) => void;
+
+async function recoveryPolicy(db: pg.Pool, check: Check) {
+  const repo = new Repository(db, "sample");
+  const config: Job["config"] = {
+    mode: "sample",
+    model: "sample",
+    promptVersion: "test",
+    reasoning: "medium",
+    maxOutputTokens: 8000,
+  };
+  const before = new Date("2026-12-01T00:15:00Z"); // Monday 19:15 ET, post is preparing.
+  const slots = dueSlots(before, new Date("2026-11-25T10:00:00Z"));
+  const older = "2026-11-27-post",
+    current = "2026-11-30-pre",
+    next = "2026-11-30-post";
+  await repo.enqueue("2026-11-27", "post", config, before);
+  await db.query("UPDATE jobs SET state='submitting' WHERE briefing_id=$1", [
+    older,
+  ]);
+  await Promise.all([
+    repo.reconcileSchedule(slots, config, before),
+    repo.reconcileSchedule(slots, config, before),
+  ]);
+  const states = async () =>
+    (
+      await db.query(
+        "SELECT b.id,b.missed_at,j.state,j.error_code FROM briefings b JOIN jobs j ON j.briefing_id=b.id WHERE b.id=ANY($1::text[])",
+        [[older, current, next]],
+      )
+    ).rows;
+  const rows = await states();
+  assert.equal(
+    rows.find((r) => r.id === older).error_code,
+    "SUBMISSION_UNKNOWN",
+  );
+  assert.ok(rows.find((r) => r.id === older).missed_at);
+  assert.ok(
+    [current, next].every((id) =>
+      rows.some((r) => r.id === id && !r.missed_at && r.state === "queued"),
+    ),
+  );
+  const originalTime = schedule("2026-11-30", "pre").targetAt;
+  for (const cutoffAt of [originalTime, before.toISOString()]) {
+    await db.query(
+      "INSERT INTO collection_bundles(briefing_id,revision,collected_at,bundle) VALUES($1,gen_random_uuid(),$2,$3)",
+      [current, cutoffAt, { cutoffAt }],
+    );
+  }
+  assert.equal(
+    (await repo.latestBundle(current, new Date(originalTime)))?.cutoffAt,
+    originalTime,
+  );
+  assert.ok(await repo.missedDetail(older));
+  assert.equal(await repo.publicDetail(older), null);
+  assert.equal(
+    (
+      await repo.publicArchive({
+        date: "2026-11-27",
+        dateWindow: { limit: 6, offset: 0 },
+      })
+    ).length,
+    2,
+  );
+  assert.ok(!(await repo.delays(before)).some((r) => r.id === older));
+  assert.equal(
+    (
+      await db.query(
+        "SELECT count(*)::int AS n FROM notification_outbox WHERE kind='missed_editions'",
+      )
+    ).rows[0].n,
+    1,
+  );
+  const command = (action: "hide" | "restore" | "retry") =>
+    repo.adminCommand(
+      { id: crypto.randomUUID(), briefingId: older, baseVersion: "", action },
+      config,
+      before,
+    );
+  await assert.rejects(command("retry"), /RETRY_NOT_AVAILABLE/);
+  await db.query(
+    `UPDATE jobs SET state='generating',payload='{"responseId":"resp_saved"}' WHERE briefing_id=$1`,
+    [current],
+  );
+  await command("hide");
+  await repo.reconcileSchedule(slots, config, before);
+  const resumed = (
+    await db.query(
+      "SELECT state,payload->>'responseId' AS response FROM jobs WHERE briefing_id=$1",
+      [current],
+    )
+  ).rows[0];
+  assert.deepEqual(resumed, { state: "generating", response: "resp_saved" });
+  assert.equal(await repo.missedDetail(older), null);
+  await command("restore");
+  assert.ok(await repo.missedDetail(older));
+  assert.equal(await repo.missedDetail("2026-11-24-pre"), null); // previously hidden, versioned
+  const atTarget = new Date(schedule("2026-11-30", "post").targetAt);
+  await repo.reconcileSchedule([], config, atTarget);
+  assert.ok(await repo.missedDetail(current));
+  assert.equal(await repo.missedDetail(next), null);
+  check(
+    "재시작 시 최신 도래 회차만 재개·준비 회차 분리·동시 복구·안내 공개/숨김·접수 불명 보존",
+  );
+  const hidden = schedule("2026-11-24", "pre");
+  const earlier = await repo.ensureSlot("2026-11-13", "post");
+  await repo.reconcileSchedule(
+    [earlier, hidden],
+    config,
+    new Date(hidden.targetAt),
+  );
+  assert.ok(await repo.missedDetail(earlier.id));
+  assert.equal(await repo.publicDetail(hidden.id), null);
+  assert.equal(await repo.missedDetail(hidden.id), null);
+  assert.equal(
+    (await db.query("SELECT id FROM jobs WHERE briefing_id=$1", [hidden.id]))
+      .rowCount,
+    0,
+  );
+  check(
+    "최신 도래 회차가 이미 발행 후 비공개이면 앞선 회차 발행·기존 회차 재등록 없음",
+  );
+}
 
 async function scheduler(db: pg.Pool, c: Config, check: Check) {
   const run = (...args: string[]) =>
@@ -294,7 +416,7 @@ async function backupRestore(
     const copy = new pg.Pool({ connectionString: dest.toString() });
     try {
       await assertDatabase(copy, "local", "sample");
-      const query = `SELECT b.id,b.current_version_id,b.visible,v.id AS version,v.previous_id
+      const query = `SELECT b.id,b.current_version_id,b.visible,b.missed_at,v.id AS version,v.previous_id
         FROM briefings b LEFT JOIN briefing_versions v ON v.briefing_id=b.id ORDER BY b.id,v.id`;
       assert.deepEqual(
         (await copy.query(query)).rows,
@@ -328,6 +450,7 @@ export async function checkOperationalFlows(
   c: Config,
   check: Check,
 ) {
+  await recoveryPolicy(db, check);
   await scheduler(db, c, check);
   await notifications(db, c, check);
   await backupRestore(db, admin, c, check);

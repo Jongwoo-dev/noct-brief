@@ -52,8 +52,16 @@ export async function runtime() {
           })),
         };
       }
-      const input = await repo.latestBundle(job.briefing_id);
-      if (!input) throw new ProviderError("DATA_PROVIDER_NOT_CONFIGURED");
+      const input = await repo.latestBundle(
+        job.briefing_id,
+        job.kind === "initial" ? job.target_at : undefined,
+      );
+      if (!input)
+        throw new ProviderError(
+          job.kind === "initial" && now > job.target_at
+            ? "EDITION_EVIDENCE_UNAVAILABLE"
+            : "DATA_PROVIDER_NOT_CONFIGURED",
+        );
       const bundle = BundleSchema.parse(input);
       if (Date.parse(bundle.cutoffAt) > now.getTime())
         throw new ProviderError("FUTURE_DATA");
@@ -73,9 +81,26 @@ export async function runtime() {
     },
     async refresh(job, bundle, now) {
       if (c.DATA_MODE === "sample") return bundle;
-      const input = await repo.latestBundle(job.briefing_id);
+      // Only an already documented earnings-call wait can extend the original evidence window.
+      const limit =
+        job.kind === "initial"
+          ? new Date(
+              Math.max(
+                Date.parse(bundle.cutoffAt),
+                job.target_at.getTime() +
+                  (bundle.pendingCalls.length ? 3600000 : 0),
+              ),
+            )
+          : undefined;
+      const input = await repo.latestBundle(job.briefing_id, limit);
+      if (!input && job.kind === "initial") return bundle;
       if (!input) throw new ProviderError("DATA_PROVIDER_NOT_CONFIGURED");
       const parsed = BundleSchema.parse(input);
+      if (
+        job.kind === "initial" &&
+        Date.parse(parsed.cutoffAt) < Date.parse(bundle.cutoffAt)
+      )
+        return bundle;
       if (Date.parse(parsed.cutoffAt) > now.getTime())
         throw new ProviderError("FUTURE_DATA");
       if (

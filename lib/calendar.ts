@@ -79,6 +79,19 @@ export function dueSlots(now: Date, since: Date) {
   }
   return result;
 }
+export function latestDueSlot(now: Date) {
+  let day = DateTime.fromJSDate(now, { zone: "America/New_York" }).startOf(
+    "day",
+  );
+  for (let i = 0; i < 32; i++, day = day.minus({ days: 1 })) {
+    const date = day.toISODate()!;
+    if (!tradingDay(date)) continue;
+    for (const session of ["post", "pre"] as const) {
+      const slot = schedule(date, session);
+      if (Date.parse(slot.targetAt) <= now.getTime()) return slot;
+    }
+  }
+}
 export function kst(iso: string) {
   return DateTime.fromISO(iso)
     .setZone("Asia/Seoul")

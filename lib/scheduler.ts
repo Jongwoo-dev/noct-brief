@@ -19,8 +19,7 @@ export async function runTick(manualSample = false) {
         Math.max(Date.parse(last) - 3600000, now.getTime() - 31 * 86400000),
       )
     : new Date(now.getTime() - 12 * 3600000);
-  for (const slot of dueSlots(now, since))
-    await repo.enqueue(slot.date, slot.session, jobConfig(), now);
+  await repo.reconcileSchedule(dueSlots(now, since), jobConfig(), now);
   for (let i = 0; i < 8; i++)
     if ((await worker.tick(new Date())) === "idle") break;
   await worker.detectDelays(now);

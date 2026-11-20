@@ -7,7 +7,7 @@ import type {
   AdminNotice,
 } from "./admin";
 
-const editionQuery = `SELECT b.id,b.us_trading_date::text AS date,b.session,b.target_at,b.published_at,b.visible,
+const editionQuery = `SELECT b.id,b.us_trading_date::text AS date,b.session,b.target_at,b.published_at,b.missed_at,b.visible,
   b.current_version_id AS version,v.content->'draft'->>'title' AS title,
   (SELECT count(*)::int FROM briefing_versions WHERE briefing_id=b.id) AS version_count,
   j.id AS job_id,j.kind,j.state,j.attempt,j.error_code,j.created_at,j.next_at,
@@ -40,9 +40,10 @@ function edition(row: Row): AdminEdition {
     session: row.session,
     targetAt: row.target_at.toISOString(),
     publishedAt: row.published_at?.toISOString() ?? null,
+    missedAt: row.missed_at?.toISOString() ?? null,
     visible: row.visible,
     version: row.version ?? "",
-    title: row.title,
+    title: row.missed_at ? "브리핑 미발행 안내" : row.title,
     versionCount: row.version_count,
     job: job(row),
   };

@@ -552,28 +552,28 @@ try {
       );
     }
   }
-  const firstDays = await repo.publicList({
+  const firstDays = await repo.publicArchive({
     dateWindow: { limit: 6, offset: 0 },
   });
-  const nextDay = await repo.publicList({
+  const nextDay = await repo.publicArchive({
     dateWindow: { limit: 1, offset: 6 },
   });
   assert.equal(firstDays.length, 12);
-  assert.equal(new Set(firstDays.map((b) => b.content.date)).size, 6);
+  assert.equal(new Set(firstDays.map((b) => b.date)).size, 6);
   assert.deepEqual(
     nextDay.map((b) => b.id),
     ["2026-11-16-pre", "2026-11-16-post"],
   );
   assert.equal(new Set([...firstDays, ...nextDay].map((b) => b.id)).size, 14);
-  const preDays = await repo.publicList({
+  const preDays = await repo.publicArchive({
     session: "pre",
     dateWindow: { limit: 6, offset: 0 },
   });
   assert.equal(preDays.length, 6);
-  assert.ok(preDays.every((b) => b.content.session === "pre"));
+  assert.ok(preDays.every((b) => b.session === "pre"));
   assert.equal(
     (
-      await repo.publicList({
+      await repo.publicArchive({
         date: "2026-11-24",
         dateWindow: { limit: 7, offset: 0 },
       })
@@ -582,11 +582,11 @@ try {
   );
   const featuredId = (await repo.publicList({ limit: 1 }))[0].id;
   assert.equal(featuredId, "2026-11-24-post");
-  const archiveWithoutFeatured = await repo.publicList({
+  const archiveWithoutFeatured = await repo.publicArchive({
     excludeId: featuredId,
     dateWindow: { limit: 6, offset: 0 },
   });
-  const nextWithoutFeatured = await repo.publicList({
+  const nextWithoutFeatured = await repo.publicArchive({
     excludeId: featuredId,
     dateWindow: { limit: 1, offset: 6 },
   });
@@ -601,13 +601,13 @@ try {
   );
   assert.equal(new Set(archiveIds).size, 13);
   assert.ok(!archiveIds.includes(featuredId));
-  const postWithoutFeatured = await repo.publicList({
+  const postWithoutFeatured = await repo.publicArchive({
     session: "post",
     excludeId: featuredId,
     dateWindow: { limit: 6, offset: 0 },
   });
   assert.deepEqual(
-    postWithoutFeatured.map((b) => b.content.date),
+    postWithoutFeatured.map((b) => b.date),
     [
       "2026-11-23",
       "2026-11-20",
@@ -619,7 +619,7 @@ try {
   );
   assert.equal(
     (
-      await repo.publicList({
+      await repo.publicArchive({
         date: "2026-11-24",
         session: "post",
         excludeId: featuredId,
@@ -651,14 +651,14 @@ try {
     "UPDATE briefings SET current_version_id=$1 WHERE id='2026-11-24-post'",
     [unvalidatedVersion],
   );
-  const publicDays = await repo.publicList({
+  const publicDays = await repo.publicArchive({
     dateWindow: { limit: 6, offset: 0 },
   });
   assert.equal(publicDays.length, 12);
-  assert.ok(publicDays.every((b) => b.content.date !== "2026-11-24"));
+  assert.ok(publicDays.every((b) => b.date !== "2026-11-24"));
   assert.equal(
     (
-      await repo.publicList({
+      await repo.publicArchive({
         date: "2026-11-24",
         dateWindow: { limit: 7, offset: 0 },
       })

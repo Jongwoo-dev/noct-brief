@@ -7,7 +7,8 @@ import {
   type Content,
   type PublicBriefing,
 } from "./contract";
-import { schedule } from "./calendar";
+import { latestDueSlot, schedule, type Session } from "./calendar";
+import type { ArchiveEntry } from "./archive";
 export type JobState =
   | "queued"
   | "collecting"
@@ -75,9 +76,66 @@ export class Repository {
     await this.db.query(
       `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at)
        SELECT $1,id,'initial',id,'queued',$3,$4,$3 FROM briefings
-       WHERE id=$2 AND current_version_id IS NULL ON CONFLICT DO NOTHING`,
+       WHERE id=$2 AND current_version_id IS NULL AND missed_at IS NULL ON CONFLICT DO NOTHING`,
       [randomUUID(), s.id, now, config],
     );
+  }
+  async reconcileSchedule(
+    slots: ReturnType<typeof schedule>[],
+    config: Job["config"],
+    now: Date,
+  ) {
+    await transaction(this.db, async (tx) => {
+      await tx.query("SELECT pg_advisory_xact_lock(710029)");
+      await tx.query(
+        `INSERT INTO briefings(id,us_trading_date,session,target_at)
+        SELECT id,date,session,"targetAt" FROM jsonb_to_recordset($1::jsonb)
+          AS s(id text,date date,session text,"targetAt" timestamptz)
+        ON CONFLICT DO NOTHING`,
+        [JSON.stringify(slots)],
+      );
+      await tx.query(
+        `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at)
+        SELECT gen_random_uuid(),id,'initial',id,'queued',$2,$3,$2 FROM briefings
+        WHERE (id=ANY($1::text[]) OR target_at <= $2) AND current_version_id IS NULL AND missed_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.dedupe_key=briefings.id)
+        ON CONFLICT DO NOTHING`,
+        [slots.map((s) => s.id), now, config],
+      );
+      // Calendar time determines the cutoff even when a due briefing has no DB row.
+      const closed = await tx.query(
+        `WITH superseded AS (
+          UPDATE jobs j SET state='failed', error_code=CASE WHEN j.state='submitting' THEN 'SUBMISSION_UNKNOWN'
+            ELSE coalesce(j.error_code,'EDITION_SUPERSEDED') END, owner=NULL,lease_until=NULL,fence=fence+1
+          FROM briefings b WHERE b.id=j.briefing_id AND j.kind='initial' AND j.state<>'published' AND b.current_version_id IS NULL
+            AND b.missed_at IS NULL AND b.target_at < $2
+          RETURNING j.briefing_id,j.error_code
+        ) UPDATE briefings b SET missed_at=$1,visible=true FROM superseded s
+          WHERE b.id=s.briefing_id AND b.current_version_id IS NULL AND b.missed_at IS NULL
+          RETURNING b.id,s.error_code`,
+        [now, latestDueSlot(now)?.targetAt],
+      );
+      if (closed.rowCount) {
+        const ids = closed.rows.map((r) => String(r.id)).sort();
+        await this.notify(
+          ids.at(-1)!,
+          "missed_editions",
+          `이전 미발행 회차 ${ids.length}건을 마감했습니다. 관리 화면에서 회차별 결과를 확인하세요.`,
+          now,
+          tx,
+        );
+        for (const row of closed.rows.filter(
+          (r) => r.error_code === "SUBMISSION_UNKNOWN",
+        ))
+          await this.notify(
+            row.id,
+            "submission_unknown",
+            "외부 생성 요청의 접수 여부를 확인하세요.",
+            now,
+            tx,
+          );
+      }
+    });
   }
   async claim(owner: string, now: Date): Promise<Job | undefined> {
     const r = await this.db.query(
@@ -128,10 +186,15 @@ export class Repository {
       new Date(target.getTime() - 4 * 86400000).toISOString()
     );
   }
-  async latestBundle(id: string): Promise<Bundle | undefined> {
+  async latestBundle(
+    id: string,
+    cutoffLimit?: Date,
+  ): Promise<Bundle | undefined> {
     const r = await this.db.query(
-      "SELECT bundle FROM collection_bundles WHERE briefing_id=$1 ORDER BY collected_at DESC LIMIT 1",
-      [id],
+      `SELECT bundle FROM collection_bundles WHERE briefing_id=$1
+        AND ($2::timestamptz IS NULL OR (bundle->>'cutoffAt')::timestamptz <= $2)
+        ORDER BY collected_at DESC LIMIT 1`,
+      [id, cutoffLimit],
     );
     return r.rows[0]?.bundle;
   }
@@ -158,7 +221,7 @@ export class Repository {
           job.briefing_id,
         ])
       ).rows[0];
-      if (job.kind === "initial" && b.current_version_id)
+      if (job.kind === "initial" && (b.current_version_id || b.missed_at))
         throw new Error("ALREADY_PUBLISHED");
       if (
         job.kind === "correction" &&
@@ -208,6 +271,62 @@ export class Repository {
       );
     });
   }
+  async publicArchive(filter: {
+    date?: string;
+    session?: string;
+    excludeId?: string;
+    dateWindow: { limit: number; offset: number };
+  }): Promise<ArchiveEntry[]> {
+    const r = await this.db.query(
+      `WITH editions AS (
+      SELECT b.id,b.us_trading_date::text AS date,b.session,b.target_at,b.missed_at,b.published_at,b.corrected_at,
+        v.content->'draft'->>'title' AS title, jsonb_array_length(v.content->'bundle'->'missing')>0 AS missing,
+        dense_rank() OVER (ORDER BY b.us_trading_date DESC) AS day_rank
+      FROM briefings b LEFT JOIN briefing_versions v ON v.id=b.current_version_id
+      WHERE b.visible AND (v.validated OR b.missed_at IS NOT NULL)
+        AND ($1::date IS NULL OR b.us_trading_date=$1::date) AND ($2::text IS NULL OR b.session=$2)
+        AND ($5::text IS NULL OR b.id<>$5)
+    ) SELECT * FROM editions WHERE day_rank>$4 AND day_rank<=$4+$3
+      ORDER BY date DESC,CASE WHEN session='pre' THEN 0 ELSE 1 END`,
+      [
+        filter.date || null,
+        filter.session || null,
+        filter.dateWindow.limit,
+        filter.dateWindow.offset,
+        filter.excludeId || null,
+      ],
+    );
+    return r.rows.map((row) => ({
+      id: row.id,
+      date: row.date,
+      session: row.session,
+      targetAt: row.target_at.toISOString(),
+      publishedAt: row.published_at?.toISOString() ?? null,
+      correctedAt: row.corrected_at?.toISOString() ?? null,
+      title: row.title ?? "브리핑 미발행 안내",
+      missing: !!row.missing,
+    }));
+  }
+  async missedDetail(id: string) {
+    const result = await this.db.query<{
+      id: string;
+      date: string;
+      session: Session;
+      target_at: Date;
+    }>(
+      "SELECT id,us_trading_date::text AS date,session,target_at FROM briefings WHERE id=$1 AND visible AND missed_at IS NOT NULL",
+      [id],
+    );
+    const r = result.rows[0];
+    return r
+      ? {
+          id: r.id,
+          date: r.date,
+          session: r.session,
+          targetAt: r.target_at.toISOString(),
+        }
+      : null;
+  }
   async publicList(
     filter: {
       date?: string;
@@ -215,27 +334,15 @@ export class Repository {
       excludeId?: string;
       limit?: number;
       offset?: number;
-      dateWindow?: { limit: number; offset: number };
     } = {},
   ): Promise<PublicBriefing[]> {
     const r = await this.db.query(
-      filter.dateWindow
-        ? `WITH editions AS (
-            SELECT b.id,b.current_version_id,b.target_at,b.published_at,b.corrected_at,v.content,
-              b.us_trading_date,b.session,dense_rank() OVER (ORDER BY b.us_trading_date DESC) AS day_rank
-            FROM briefings b JOIN briefing_versions v ON v.id=b.current_version_id
-            WHERE b.visible AND v.validated
-              AND ($1::date IS NULL OR b.us_trading_date=$1::date)
-              AND ($2::text IS NULL OR b.session=$2)
-              AND ($5::text IS NULL OR b.id<>$5)
-          ) SELECT * FROM editions WHERE day_rank>$4 AND day_rank<=$4+$3
-            ORDER BY us_trading_date DESC,CASE WHEN session='pre' THEN 0 ELSE 1 END`
-        : `SELECT b.id,b.current_version_id,b.target_at,b.published_at,b.corrected_at,v.content FROM briefings b JOIN briefing_versions v ON v.id=b.current_version_id WHERE b.visible AND v.validated AND ($1::date IS NULL OR b.us_trading_date=$1::date) AND ($2::text IS NULL OR b.session=$2) AND ($5::text IS NULL OR b.id<>$5) ORDER BY b.target_at DESC LIMIT $3 OFFSET $4`,
+      "SELECT b.id,b.current_version_id,b.target_at,b.published_at,b.corrected_at,v.content FROM briefings b JOIN briefing_versions v ON v.id=b.current_version_id WHERE b.visible AND v.validated AND ($1::date IS NULL OR b.us_trading_date=$1::date) AND ($2::text IS NULL OR b.session=$2) AND ($5::text IS NULL OR b.id<>$5) ORDER BY b.target_at DESC LIMIT $3 OFFSET $4",
       [
         filter.date || null,
         filter.session || null,
-        filter.dateWindow?.limit ?? filter.limit ?? 20,
-        filter.dateWindow?.offset ?? filter.offset ?? 0,
+        filter.limit ?? 20,
+        filter.offset ?? 0,
         filter.excludeId || null,
       ],
     );
@@ -277,7 +384,7 @@ export class Repository {
   async delays(now: Date) {
     return (
       await this.db.query(
-        "SELECT b.id,b.us_trading_date::text,b.session,b.target_at,j.state FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial' WHERE b.published_at IS NULL AND b.target_at<$1 ORDER BY b.target_at DESC LIMIT 30",
+        "SELECT b.id,b.us_trading_date::text,b.session,b.target_at,j.state FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial' WHERE b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at<$1 ORDER BY b.target_at DESC LIMIT 30",
         [now],
       )
     ).rows;
@@ -337,11 +444,11 @@ export class Repository {
       if (!b) throw new Error("BRIEFING_NOT_FOUND");
       if (command.action === "hide" || command.action === "restore") {
         if (
-          !b.current_version_id ||
-          b.current_version_id !== command.baseVersion
+          (!b.current_version_id && !b.missed_at) ||
+          (b.current_version_id ?? "") !== command.baseVersion
         )
           throw new Error("VERSION_CONFLICT");
-        if (command.action === "restore") {
+        if (command.action === "restore" && !b.missed_at) {
           const v = (
             await tx.query(
               "SELECT content,validated FROM briefing_versions WHERE id=$1",
@@ -356,6 +463,7 @@ export class Repository {
           b.id,
         ]);
       } else if (command.action === "retry") {
+        if (b.missed_at) throw new Error("RETRY_NOT_AVAILABLE");
         if ((b.current_version_id ?? "") !== command.baseVersion)
           throw new Error("VERSION_CONFLICT");
         const latest = (

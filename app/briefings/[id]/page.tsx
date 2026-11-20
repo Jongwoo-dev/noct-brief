@@ -58,8 +58,15 @@ export async function generateMetadata({
 }) {
   const b = await detail((await params).id);
   return {
-    title: b?.content.draft.title ?? "브리핑을 찾을 수 없습니다",
-    robots: b?.content.sample ? { index: false, follow: false } : undefined,
+    title: b
+      ? "content" in b
+        ? b.content.draft.title
+        : "브리핑 미발행 안내"
+      : "브리핑을 찾을 수 없습니다",
+    robots:
+      b && (!("content" in b) || b.content.sample)
+        ? { index: false, follow: false }
+        : undefined,
   };
 }
 export default async function Briefing({
@@ -70,6 +77,36 @@ export default async function Briefing({
   const { id } = await params;
   const b = await detail(id);
   if (!b) notFound();
+  if (!("content" in b))
+    return (
+      <main id="main" className="detail-page">
+        <Link className="back" href="/#archive">
+          <UiIcon name="back" /> 지난 브리핑
+        </Link>
+        <header className="article-header">
+          <div className="eyebrow">
+            <span className="session-label">
+              <UiIcon name={b.session} />
+              {sessionLabel(b.session)} 브리핑
+            </span>{" "}
+            미국 {b.date}
+          </div>
+          <h1>브리핑 미발행 안내</h1>
+          <p>
+            다음 정규 회차의 발행 시각까지 이 브리핑을 발행하지 못해 해당 회차를
+            마감했습니다.
+          </p>
+          <dl className="article-meta">
+            <div>
+              <dt>발행 예정 시각</dt>
+              <dd>
+                <time dateTime={b.targetAt}>{kst(b.targetAt)} KST</time>
+              </dd>
+            </div>
+          </dl>
+        </header>
+      </main>
+    );
   const c = b.content;
   const { older, newer } = await neighbors(id, b.targetAt);
   const contents = (

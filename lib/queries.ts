@@ -3,7 +3,7 @@ import { samples, SAMPLE_AS_OF } from "../data/samples";
 import { readConfig } from "./config";
 import { pool, assertDatabase } from "./db";
 import { Repository } from "./repository";
-import { archivePage, ARCHIVE_DAYS_PER_PAGE } from "./archive";
+import { archivePage, archiveEntry, ARCHIVE_DAYS_PER_PAGE } from "./archive";
 export async function publicData() {
   const c = readConfig();
   if (c.DATA_MODE === "sample" && !c.DATABASE_URL)
@@ -42,10 +42,10 @@ export async function archive(filter: {
         (!filter.date || b.content.date === filter.date) &&
         (!filter.session || b.content.session === filter.session),
     );
-    return archivePage(rows, filter.page);
+    return archivePage(rows.map(archiveEntry), filter.page);
   }
   await assertDatabase(pool(), c.APP_ENV, c.DATA_MODE);
-  const rows = await new Repository(pool(), c.DATA_MODE).publicList({
+  const rows = await new Repository(pool(), c.DATA_MODE).publicArchive({
     date: filter.date,
     session: filter.session,
     excludeId: filter.excludeId,
@@ -70,13 +70,13 @@ export async function neighbors(id: string, targetAt: string) {
     repo = new Repository(db, c.DATA_MODE);
   const older = (
     await db.query(
-      "SELECT id FROM briefings WHERE visible AND target_at<$1 ORDER BY target_at DESC LIMIT 1",
+      "SELECT id FROM briefings WHERE visible AND current_version_id IS NOT NULL AND target_at<$1 ORDER BY target_at DESC LIMIT 1",
       [targetAt],
     )
   ).rows[0]?.id;
   const newer = (
     await db.query(
-      "SELECT id FROM briefings WHERE visible AND target_at>$1 ORDER BY target_at ASC LIMIT 1",
+      "SELECT id FROM briefings WHERE visible AND current_version_id IS NOT NULL AND target_at>$1 ORDER BY target_at ASC LIMIT 1",
       [targetAt],
     )
   ).rows[0]?.id;
@@ -90,5 +90,6 @@ export async function detail(id: string) {
   if (c.DATA_MODE === "sample" && !c.DATABASE_URL)
     return samples.find((b) => b.id === id) ?? null;
   await assertDatabase(pool(), c.APP_ENV, c.DATA_MODE);
-  return new Repository(pool(), c.DATA_MODE).publicDetail(id);
+  const repo = new Repository(pool(), c.DATA_MODE);
+  return (await repo.publicDetail(id)) ?? repo.missedDetail(id);
 }

@@ -140,19 +140,18 @@ export default async function Home({
                   {day.briefings.map((b) => (
                     <article key={b.id}>
                       <span className="archive-session">
-                        <UiIcon name={b.content.session} />
-                        {sessionLabel(b.content.session)}
+                        <UiIcon name={b.session} />
+                        {sessionLabel(b.session)}
                       </span>
                       <div className="archive-body">
                         <h4>
-                          <Link href={`/briefings/${b.id}`}>
-                            {b.content.draft.title}
-                          </Link>
+                          <Link href={`/briefings/${b.id}`}>{b.title}</Link>
                         </h4>
                         <p>
-                          {kst(b.publishedAt)} KST 발행
-                          {b.content.bundle.missing.length > 0 &&
-                            " · 일부 자료 미반영"}
+                          {b.publishedAt
+                            ? `${kst(b.publishedAt)} KST 발행`
+                            : `발행 예정이었던 시각 · ${kst(b.targetAt)} KST`}
+                          {b.missing && " · 일부 자료 미반영"}
                           {b.correctedAt && " · 정정됨"}
                         </p>
                       </div>

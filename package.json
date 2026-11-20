@@ -21,7 +21,7 @@
     "worker": "tsx scripts/worker.ts",
     "check": "npm run typecheck && npm test && npm run test:integration && npm run build",
     "release:package": "tsx scripts/ops/package-release.ts",
-    "format:check": "prettier --check app components lib data scripts tests next.config.ts vitest.config.ts tsconfig.json package.json"
+    "format:check": "prettier --check app components lib data scripts tests instrumentation.ts next.config.ts vitest.config.ts tsconfig.json package.json"
   },
   "dependencies": {
     "better-auth": "1.7.14",

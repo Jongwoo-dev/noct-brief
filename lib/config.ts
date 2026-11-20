@@ -15,7 +15,6 @@ const schema = z.object({
   GOOGLE_CLIENT_SECRET: z.string().default(""),
   BETTER_AUTH_SECRET: z.string().default(""),
   ADMIN_GOOGLE_SUB: z.string().default(""),
-  CRON_SECRET: z.string().default(""),
   OPENAI_API_KEY: z.string().default(""),
   OPENAI_MODEL: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["low", "medium", "high"]).default("medium"),
@@ -72,15 +71,10 @@ export function readConfig(
         );
     }
   }
-  if (
-    c.AUTO_PUBLISH_ENABLED &&
-    (!c.CRON_SECRET || c.CRON_SECRET.length < 32 || !c.EXTERNAL_CALLS_ENABLED)
-  )
-    throw new Error("자동 발행 설정 확인: CRON_SECRET, EXTERNAL_CALLS_ENABLED");
+  if (c.AUTO_PUBLISH_ENABLED && !c.EXTERNAL_CALLS_ENABLED)
+    throw new Error("자동 발행 설정 확인: EXTERNAL_CALLS_ENABLED");
   if (c.TELEGRAM_ENABLED && (!c.TELEGRAM_BOT_TOKEN || !c.TELEGRAM_CHAT_ID))
     throw new Error("알림 설정 확인: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID");
-  if (c.CRON_SECRET && c.CRON_SECRET === c.BETTER_AUTH_SECRET)
-    throw new Error("예약 키와 인증 키는 분리해야 합니다.");
   return c;
 }
 export function authConfigured(c: Config) {

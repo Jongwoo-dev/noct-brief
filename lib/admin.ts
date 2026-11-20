@@ -22,6 +22,7 @@ export type AdminEdition = {
   session: "pre" | "post";
   targetAt: string;
   publishedAt: string | null;
+  missedAt?: string | null;
   visible: boolean;
   version: string;
   title: string | null;
@@ -53,18 +54,23 @@ export const stateLabels: Record<JobState, string> = {
   failed: "확인 필요",
   published: "처리 완료",
 };
-export function adminActions(edition: Pick<AdminEdition, "version" | "job">) {
+export function adminActions(
+  edition: Pick<AdminEdition, "version" | "job" | "missedAt">,
+) {
   const j = edition.job;
   const active = !!j && !["failed", "published"].includes(j.state);
   const unknown = j?.errorCode === "SUBMISSION_UNKNOWN";
   const stale = j?.kind === "correction" && j.baseVersion !== edition.version;
   return {
-    retry: !!j && j.state === "failed" && !unknown && !stale,
+    retry:
+      !edition.missedAt && !!j && j.state === "failed" && !unknown && !stale,
     correct: !!edition.version && !active && !unknown,
-    visibility: !!edition.version,
+    visibility: !!edition.version || !!edition.missedAt,
   };
 }
 export const adminErrors: Record<string, string> = {
+  EDITION_SUPERSEDED: "다음 정규 회차가 도래해 미발행 안내로 마감했습니다.",
+  EDITION_EVIDENCE_UNAVAILABLE: "발행 예정 시각까지의 근거 자료가 없습니다.",
   COMMAND_REPLAY: "이미 처리한 요청입니다. 새로고침해 현재 상태를 확인하세요.",
   BRIEFING_NOT_FOUND: "회차를 찾을 수 없습니다.",
   VERSION_CONFLICT: "보고서 버전이 바뀌었습니다. 새로고침 후 다시 확인하세요.",

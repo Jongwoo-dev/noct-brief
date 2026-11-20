@@ -54,7 +54,7 @@ assert.equal(
       headers: { authorization: "Bearer forged" },
     })
   ).status,
-  403,
+  404,
 );
 assert.equal((await fetch(`${base}/api/health`)).status, 200);
 const admin = await fetch(`${base}/admin`);
@@ -139,5 +139,5 @@ const sampleCommand = await fetch(`${base}/api/admin/sample`, {
 });
 assert.equal(sampleCommand.status, 403);
 console.log(
-  "HTTP: home, icons and brand assets, empty filter, missing detail, cross-origin, forged session, disabled scheduler, health, admin gate passed.",
+  "HTTP: home, icons and brand assets, empty filter, missing detail, cross-origin, forged session, removed tick route, health, admin gate passed.",
 );

@@ -3,7 +3,7 @@ import { schedule, tradingDay, upcoming, kst, dueSlots } from "../lib/calendar";
 import { readConfig } from "../lib/config";
 import { samples, sampleContent } from "../data/samples";
 import { validateContent, safeUrl } from "../lib/contract";
-import { equalSecret, sameOrigin } from "../lib/security";
+import { sameOrigin } from "../lib/security";
 import { expiredBackups } from "../scripts/ops/backup-policy";
 describe("거래일과 시간", () => {
   it("DST 전환 전후 장전·장후 한국 시각", () => {
@@ -101,10 +101,19 @@ describe("환경·권한", () => {
       readConfig({ DATABASE_URL: "postgresql://a:b@localhost/prod" }),
     ).toThrow();
   });
-  it("예약 비밀키 누락·오류 거부", () => {
-    expect(equalSecret("x", "")).toBe(false);
-    expect(equalSecret("x", "y")).toBe(false);
-    expect(equalSecret("x", "x")).toBe(true);
+  it("운영 자동 발행은 외부 호출 활성화가 필요", () => {
+    const env = {
+      APP_ENV: "production",
+      DATA_MODE: "live",
+      BETTER_AUTH_URL: "https://noct.example",
+      DATABASE_URL: "postgres://localhost/noct_test",
+      AUTO_PUBLISH_ENABLED: "true",
+    };
+    expect(() => readConfig(env)).toThrow("EXTERNAL_CALLS_ENABLED");
+    expect(
+      readConfig({ ...env, EXTERNAL_CALLS_ENABLED: "true" })
+        .AUTO_PUBLISH_ENABLED,
+    ).toBe(true);
   });
   it("교차 출처 및 비JSON 변경 요청 거부", () => {
     expect(
