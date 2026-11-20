@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { readConfig } from "../lib/config";
 import { migrate } from "./migrate";
 import { Repository, type Job } from "../lib/repository";
+import { dueSlots } from "../lib/calendar";
 import { Worker } from "../lib/worker";
 import { sampleContent } from "../data/samples";
 import {
@@ -14,7 +15,7 @@ import {
 } from "../lib/providers";
 import { drainNotifications } from "../lib/notifications";
 import { assertDatabase } from "../lib/db";
-import { pgTool } from "./ops/pg-tools";
+import { checkOperationalFlows } from "./test-operations";
 import { adminDetail, adminOverview } from "../lib/admin-queries";
 const c = readConfig();
 if (c.APP_ENV !== "local" || c.DATA_MODE !== "sample" || !c.DATABASE_URL)
@@ -315,7 +316,35 @@ try {
   );
   const fresh = (await repo.claim("c", now()))!;
   await assert.rejects(() => repo.save(stale, "failed", now()), /LEASE_LOST/);
-  await repo.save(fresh, "failed", now());
+  await repo.markSubmitting(fresh);
+  await db.query(
+    "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",
+    [fresh.id],
+  );
+  await db.query(
+    "ALTER TABLE notification_outbox ADD CONSTRAINT interrupt_outbox CHECK (kind <> 'submission_unknown')",
+  );
+  await assert.rejects(() => w.tick(now()), /interrupt_outbox/);
+  assert.equal(
+    (await db.query("SELECT state FROM jobs WHERE id=$1", [fresh.id])).rows[0]
+      .state,
+    "submitting",
+  );
+  await db.query(
+    "ALTER TABLE notification_outbox DROP CONSTRAINT interrupt_outbox",
+  );
+  await db.query(
+    "UPDATE jobs SET lease_until=now()-interval '1 second' WHERE id=$1",
+    [fresh.id],
+  );
+  await w.tick(now());
+  assert.equal(
+    (await db.query("SELECT error_code FROM jobs WHERE id=$1", [fresh.id]))
+      .rows[0].error_code,
+    "SUBMISSION_UNKNOWN",
+  );
+  assert.equal(p.submits(), 1);
+  check("접수 중단 후 재시작·실패 알림 저장 오류 롤백·재제출 방지");
   check("동시 작업자 단일 잠금·만료 후 fencing");
   await repo.enqueue("2026-10-22", "post", config, now());
   const unknown = providers("2026-10-22", "post");
@@ -390,6 +419,15 @@ try {
     ).rows[0].count,
     "0",
   );
+  await waiting.detectDelays(new Date(target.getTime() + 60 * 60000));
+  assert.equal(
+    (
+      await db.query(
+        "SELECT id FROM notification_outbox WHERE dedupe_key='2026-10-21-post:delay'",
+      )
+    ).rowCount,
+    1,
+  );
   await waiting.tick(new Date(target.getTime() + 61 * 60000));
   await finish(waiting, new Date(target.getTime() + 62 * 60000));
   const limited = (await repo.publicDetail("2026-10-21-post"))!;
@@ -408,6 +446,18 @@ try {
   );
   await finish(ew, now(), 4);
   assert.equal(await repo.publicDetail("2026-10-20-pre"), null);
+  await ew.detectDelays(new Date(future.getTime() + 15 * 60000 - 1));
+  const delayCount = async () =>
+    (
+      await db.query(
+        "SELECT id FROM notification_outbox WHERE dedupe_key='2026-10-20-pre:delay'",
+      )
+    ).rowCount;
+  assert.equal(await delayCount(), 0);
+  await ew.detectDelays(new Date(future.getTime() + 15 * 60000));
+  await ew.detectDelays(new Date(future.getTime() + 16 * 60000));
+  assert.equal(await delayCount(), 1);
+  check("기술 지연 15분 경계·콜 대기 60분 경계·반복 경보 억제");
   await ew.tick(new Date(future.getTime() + 1000));
   assert.ok(await repo.publicDetail("2026-10-20-pre"));
   check("미리 준비된 글의 목표 시각 이전 노출 방지");
@@ -586,6 +636,12 @@ try {
   await db.query(
     "UPDATE briefings SET visible=false WHERE id='2026-11-24-pre'",
   );
+  await repo.enqueue("2026-11-24", "pre", config, now());
+  assert.equal(
+    (await db.query("SELECT id FROM jobs WHERE briefing_id='2026-11-24-pre'"))
+      .rowCount,
+    0,
+  );
   const unvalidatedVersion = randomUUID();
   await db.query(
     "INSERT INTO briefing_versions(id,briefing_id,content,created_at,config,validated) VALUES($1,'2026-11-24-post',$2,now(),$3,false)",
@@ -610,52 +666,27 @@ try {
     0,
   );
   check("거래일 페이지 경계·세션/날짜 필터·비공개 및 미검증 버전 제외");
-  // Export and restore actual PostgreSQL data into a separate empty database.
-  const { execFile } = await import("node:child_process"),
-    { promisify } = await import("node:util"),
-    { mkdir } = await import("node:fs/promises"),
-    { resolve, dirname } = await import("node:path");
-  await mkdir("temp/work", { recursive: true });
-  const file = resolve(`temp/work/${name}.dump`);
-  const pgEnv = {
-    ...process.env,
-    PGHOST: url.hostname,
-    PGPORT: url.port,
-    PGUSER: decodeURIComponent(url.username),
-    PGPASSWORD: decodeURIComponent(url.password),
-    PGDATABASE: name,
-  };
-  await promisify(execFile)(
-    pgTool("pg_dump"),
-    ["-Fc", "--no-owner", "--no-acl", "-f", file],
-    { env: pgEnv },
-  );
-  const restored = `${name}_restored`;
-  await admin.query(`CREATE DATABASE "${restored}"`);
-  await promisify(execFile)(
-    pgTool("pg_restore"),
-    [
-      "--exit-on-error",
-      "--single-transaction",
-      "--no-owner",
-      "--no-acl",
-      "-d",
-      restored,
-      file,
-    ],
-    { env: pgEnv },
-  );
-  const ru = new URL(url);
-  ru.pathname = `/${restored}`;
-  const restoredDb = new pg.Pool({ connectionString: ru.toString() });
+  const backlogEnd = new Date("2026-06-30T12:00:00Z");
+  const backlog = dueSlots(backlogEnd, new Date("2026-06-01T00:00:00Z"));
+  assert.ok(backlog.length > 30);
+  for (const { date, session } of backlog) await repo.ensureSlot(date, session);
+  await w.detectDelays(new Date("2026-07-01T12:00:00Z"));
   assert.equal(
-    (await restoredDb.query("SELECT count(*) FROM briefing_versions")).rows[0]
-      .count,
-    (await db.query("SELECT count(*) FROM briefing_versions")).rows[0].count,
+    (
+      await db.query(
+        "SELECT id FROM notification_outbox WHERE kind='delay' AND briefing_id=ANY($1::text[])",
+        [backlog.map((s) => s.id)],
+      )
+    ).rowCount,
+    backlog.length,
   );
-  await restoredDb.end();
-  await admin.query(`DROP DATABASE "${restored}"`);
-  check("실제 pg_dump와 분리 DB pg_restore 후 버전 수 일치");
+  check("30회를 초과하는 누락 회차도 지연 알림 등록");
+  await checkOperationalFlows(
+    db,
+    admin,
+    { ...c, DATABASE_URL: url.toString() },
+    check,
+  );
   console.log(
     `Integration: ${checks} checks passed (local PostgreSQL; external services mocked).`,
   );

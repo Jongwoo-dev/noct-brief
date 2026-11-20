@@ -133,8 +133,7 @@ it("비용 한도 응답은 작업 실패로 보존하고 재시도를 예약하
   };
   const repo = {
     claim: vi.fn().mockResolvedValue(runningJob),
-    save: vi.fn(),
-    notify: vi.fn(),
+    fail: vi.fn(),
   };
   const request = vi
     .fn()
@@ -150,14 +149,11 @@ it("비용 한도 응답은 작업 실패로 보존하고 재시도를 예약하
     new ResponsesGenerator(config, request),
   );
   expect(await worker.tick(now)).toBe("processed");
-  expect(repo.save).toHaveBeenCalledExactlyOnceWith(
+  expect(repo.fail).toHaveBeenCalledExactlyOnceWith(
     runningJob,
-    "failed",
-    now,
-    runningJob.payload,
     "PROJECT_SPEND_LIMIT_EXCEEDED",
+    now,
   );
-  expect(repo.notify).toHaveBeenCalledOnce();
   expect(request).toHaveBeenCalledOnce();
 });
 it("거부·불완전 응답은 초안으로 사용하지 않음", async () => {

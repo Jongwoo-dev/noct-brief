@@ -73,7 +73,9 @@ export class Repository {
   ) {
     const s = await this.ensureSlot(date, session);
     await this.db.query(
-      "INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at) VALUES($1,$2,'initial',$2,'queued',$3,$4,$3) ON CONFLICT DO NOTHING",
+      `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at)
+       SELECT $1,id,'initial',id,'queued',$3,$4,$3 FROM briefings
+       WHERE id=$2 AND current_version_id IS NULL ON CONFLICT DO NOTHING`,
       [randomUUID(), s.id, now, config],
     );
   }
@@ -92,8 +94,9 @@ export class Repository {
     payload = job.payload,
     errorCode: string | null = null,
     attempt = job.attempt,
+    db: pg.Pool | pg.PoolClient = this.db,
   ) {
-    const r = await this.db.query(
+    const r = await db.query(
       "UPDATE jobs SET state=$1,next_at=$2,payload=$3,error_code=$4,attempt=$5,owner=NULL,lease_until=NULL WHERE id=$6 AND owner=$7 AND fence=$8 AND lease_until>clock_timestamp()",
       [
         state,
@@ -279,8 +282,29 @@ export class Repository {
       )
     ).rows;
   }
-  async notify(id: string, kind: string, message: string, now: Date) {
-    await this.db.query(
+  async fail(job: Job, code: string, now: Date) {
+    const unknown = code === "SUBMISSION_UNKNOWN";
+    await transaction(this.db, async (tx) => {
+      await this.save(job, "failed", now, job.payload, code, job.attempt, tx);
+      await this.notify(
+        job.briefing_id,
+        unknown ? "submission_unknown" : "failed",
+        unknown
+          ? "외부 요청 접수 여부를 확인해야 합니다. 자동 재요청을 중단했습니다."
+          : `작업 실패: ${code}. 관리 화면에서 확인하세요.`,
+        now,
+        tx,
+      );
+    });
+  }
+  async notify(
+    id: string,
+    kind: string,
+    message: string,
+    now: Date,
+    db: pg.Pool | pg.PoolClient = this.db,
+  ) {
+    await db.query(
       "INSERT INTO notification_outbox(id,dedupe_key,briefing_id,kind,message,next_at) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING",
       [randomUUID(), `${id}:${kind}`, id, kind, message, now],
     );

@@ -39,19 +39,7 @@ export class Worker {
                 : "VALIDATION_OR_STORAGE_ERROR",
             );
       if (e.ambiguous || job.state === "submitting") {
-        await this.repo.save(
-          job,
-          "failed",
-          now,
-          job.payload,
-          "SUBMISSION_UNKNOWN",
-        );
-        await this.repo.notify(
-          job.briefing_id,
-          "submission_unknown",
-          "외부 요청 접수 여부를 확인해야 합니다. 자동 재요청을 중단했습니다.",
-          now,
-        );
+        await this.repo.fail(job, "SUBMISSION_UNKNOWN", now);
       } else if (e.retryable && job.attempt < 3) {
         const minutes = Math.max(
           [1, 5, 15][job.attempt],
@@ -100,20 +88,11 @@ export class Worker {
             e.code,
           );
         } catch {
-          await this.fail(job, e.code, now);
+          await this.repo.fail(job, e.code, now);
         }
-      } else await this.fail(job, e.code, now);
+      } else await this.repo.fail(job, e.code, now);
     }
     return "processed";
-  }
-  private async fail(job: Job, code: string, now: Date) {
-    await this.repo.save(job, "failed", now, job.payload, code);
-    await this.repo.notify(
-      job.briefing_id,
-      "failed",
-      `작업 실패: ${code}. 관리 화면에서 확인하세요.`,
-      now,
-    );
   }
   private async step(job: Job, now: Date) {
     if (job.kind === "initial" && tradingDay(job.us_trading_date) !== true)
@@ -239,16 +218,15 @@ export class Worker {
     }
   }
   async detectDelays(now = new Date()) {
-    const delays = await this.repo.delays(now);
-    for (const d of delays) {
-      const minutes = (now.getTime() - d.target_at.getTime()) / 60000;
-      if (minutes >= 15 && !(d.state === "waiting_data" && minutes < 60))
-        await this.repo.notify(
-          d.id,
-          "delay",
-          "목표 시각 이후 기술적 발행 지연이 이어지고 있습니다.",
-          now,
-        );
-    }
+    await this.repo.db.query(
+      `INSERT INTO notification_outbox(id,dedupe_key,briefing_id,kind,message,next_at)
+       SELECT gen_random_uuid(),b.id || ':delay',b.id,'delay','목표 시각 이후 기술적 발행 지연이 이어지고 있습니다.',$1
+       FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial'
+       WHERE b.published_at IS NULL AND b.target_at <= $1::timestamptz - interval '15 minutes'
+         AND (j.state IS DISTINCT FROM 'waiting_data' OR b.target_at <= $1::timestamptz - interval '1 hour')
+         AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.dedupe_key=b.id || ':delay')
+       ON CONFLICT (dedupe_key) DO NOTHING`,
+      [now],
+    );
   }
 }

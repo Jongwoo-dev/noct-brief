@@ -1,6 +1,6 @@
 # 운영·복구 절차
 
-2026-10-27. 실행 가능한 준비 코드와 운영 절차이며 실제 서버에 적용한 결과가 아니다. 구매·계정 변경·실제 배포는 별도 승인 후 진행한다. 로컬 실제 PostgreSQL 검증은 TECH_SPEC 12절을 따른다.
+2026-11-21 갱신. 분리 PostgreSQL에서 예약 처리와 백업·복원을 검증했다. Telegram과 외부 저장소 응답은 모의로 시험했다. 서버 구매·계정 변경·실제 배포는 별도 승인 후 진행한다. [기술 설계 12절](TECH_SPEC.md)
 
 ## 새 서버 준비
 
@@ -30,11 +30,15 @@ Linux 빌드 환경에서 `npm ci`, `npm run typecheck`, `npm test`, `npm run bu
 
 timer 초기 제안은 매일 UTC 07:00, 최대 2분 분산이다. BACKUP_BUCKET을 정하고 버킷의 공개 접근을 차단한다. 권한은 이 prefix의 PutObject/GetObject/DeleteObject 및 제한된 ListBucket만 부여한다. AWS 자격 증명과 업로드 암호화 옵션의 선택 저장소 호환성은 미검증이다. 서버 전체 스냅샷은 만들지 않는다.
 
-복원은 백업 파일을 내려받고 해시를 확인한 후 **현재 앱 DB와 다른 빈 DB**에서 수행한다. `RESTORE_DATABASE_URL`을 지정하고 `CONFIRM_RESTORE=empty-database node --import tsx scripts/ops/restore.ts 백업파일`을 실행한다. 원자적 pg_restore 후 회차 수·현재 버전 연결·비공개 글 제외·로그인·환경 표식을 확인하고 DB 연결을 전환한다. 로컬 테스트 DB로 운영 사본을 연결해 자동 실행하지 않는다. 새 서버를 준비해 앱·비밀 설정·DB를 복원할 수 있어야 하며 기존 DB 삭제는 별도 작업이다.
+복원은 백업 파일을 내려받고 해시를 확인한 후 **현재 앱 DB와 다른 빈 DB**에서 수행한다. `RESTORE_DATABASE_URL`을 지정하고 `CONFIRM_RESTORE=empty-database node --import tsx scripts/ops/restore.ts 백업파일`을 실행한다. 원자적 pg_restore 후 회차 수·현재 버전 연결·비공개 글 제외·로그인·환경 표식을 확인하고 DB 연결을 전환한다. 로컬 테스트 DB로 운영 사본을 연결해 자동 실행하지 않는다. 새 서버를 준비해 앱·비밀 설정·DB를 복원할 수 있어야 하며 기존 DB 삭제는 별도 작업이다. [PostgreSQL 복원 옵션](https://www.postgresql.org/docs/current/app-pgrestore.html)
 
-백업 실패 또는 26시간 이상 성공 기록이 없으면 예외 outbox를 사용한다. 서버·DB·예약 작업 전체 장애에는 같은 서버에서 알림을 보낼 수 없으므로 외부 heartbeat 후보를 배포 전에 확인한다. 아직 외부 감시를 설치하지 않았다.
+백업은 DB 환경·모드 표식을 먼저 검사한다. 업로드 확인과 만료분 정리까지 성공해야 마지막 성공 시각이 갱신된다. 정상 DB에서 발생한 덤프·업로드·정리 실패는 UTC 날짜별로 한 번 알림 대기열에 기록한다. 예약 실행기는 최근 성공 시각부터 26시간이 되면 미갱신 알림을 기록한다. 첫 백업 전에는 감시 시작 시각부터 계산한다. 서버·DB·예약 작업 전체 장애를 감지할 외부 heartbeat는 배포 전 확인 과제다.
+
+복원 대상은 새로 준비하고 전환 전까지 앱과 다른 클라이언트의 접속을 닫아 둔다. 스크립트가 기존 연결·사용자 스키마·객체를 확인하고 복원끼리 겹치지 않도록 잠금을 잡는다. DB 주소의 호스트·포트·DB 이름은 URI 본문에 명시한다. 도구에 전달하는 쿼리 옵션은 `sslmode`, `sslcert`, `sslkey`, `sslrootcert`, `application_name`, `connect_timeout`이다. 로컬 재현은 `npm run db:local` 실행 중 별도 터미널에서 `npm run test:integration`을 사용한다.
 
 ## 운영 상태와 복구
+
+예약 처리기가 정상 종료하면 `last_scheduler`에 실행 시작 시각을 기록한다. 중단 후 재실행하면 기존 작업에서 이어가며, 저장된 시각이 없으면 최근 12시간부터 탐색한다. 새로 탐색하는 범위는 최대 31일이다. 알림 대기열은 발송 실패 후 1·5·15분에 재시도한다. 네 번째 실패는 관리자 목록의 「예외 알림」에서 발송 실패로 확인한다.
 
 - `/admin`: 회차 상태, 다음 처리, 오류 코드, 누락, 사용량, 정정·재시도·비공개·복구. Google sub 허용 목록과 서버 세션 검사를 적용한다.
 - `SUBMISSION_UNKNOWN`: API 접수 여부 불명. 공급자 기록을 확인해 기존 response ID를 회수하거나 미접수임을 확인하기 전 재요청하지 않는다. 무조건 재실행 버튼은 차단한다. 해당 복구 조정은 운영자 확인 후 DB 작업으로 처리하며 자동 추측하지 않는다.

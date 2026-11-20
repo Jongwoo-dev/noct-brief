@@ -1,6 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { Config } from "./config";
+export async function checkBackupAge(db: pg.Pool, now: Date) {
+  await db.query(
+    "INSERT INTO app_settings(key,value) VALUES('backup_monitor_since',$1) ON CONFLICT DO NOTHING",
+    [now.toISOString()],
+  );
+  await db.query(
+    `WITH latest AS (
+       SELECT value FROM app_settings WHERE key IN ('last_backup','backup_monitor_since')
+       ORDER BY (key='last_backup') DESC LIMIT 1
+     ) INSERT INTO notification_outbox(id,dedupe_key,kind,message,next_at)
+       SELECT gen_random_uuid(),'backup_stale:' || value,'backup_stale',
+         'DB 외부 백업 성공 기록이 26시간 이상 갱신되지 않았습니다.',$1 FROM latest
+       WHERE value::timestamptz <= $1::timestamptz - interval '26 hours'
+       ON CONFLICT (dedupe_key) DO NOTHING`,
+    [now],
+  );
+}
 export async function drainNotifications(
   db: pg.Pool,
   c: Config,
@@ -32,11 +49,6 @@ export async function drainNotifications(
       );
       const result = await response.json();
       if (!response.ok || !result.ok) throw new Error("DELIVERY_FAILED");
-      await db.query(
-        "UPDATE notification_outbox SET status='sent',sent_at=$1,owner=NULL,lease_until=NULL WHERE id=$2 AND owner=$3",
-        [now, row.id, owner],
-      );
-      sent++;
     } catch {
       const tries = row.attempts + 1;
       await db.query(
@@ -49,7 +61,13 @@ export async function drainNotifications(
           owner,
         ],
       );
+      continue;
     }
+    const saved = await db.query(
+      "UPDATE notification_outbox SET status='sent',sent_at=$1,owner=NULL,lease_until=NULL WHERE id=$2 AND owner=$3",
+      [now, row.id, owner],
+    );
+    sent += saved.rowCount ?? 0;
   }
   return { sent, disabled: false };
 }

@@ -142,6 +142,7 @@ describe("백업 보관", () => {
       expiredBackups(
         [
           "noct-db/noct-2026-10-01T07-00-00Z.dump",
+          "noct-db/noct-2026-02-30T07-00-00Z.dump",
           "noct-db/noct-2026-10-13T07-00-00Z.dump",
           "noct-db/noct-2026-10-27T07-00-00Z.dump",
           "other/noct-2026-10-01T07-00-00Z.dump",

@@ -255,7 +255,9 @@ export function AdminDashboard({
                   {(
                     {
                       failed: "작업 실패",
-                      delayed: "발행 지연",
+                      delay: "발행 지연",
+                      backup: "DB 백업 실패",
+                      backup_stale: "DB 백업 26시간 미갱신",
                       submission_unknown: "접수 확인 필요",
                     } as Record<string, string>
                   )[n.kind] ?? "운영 확인 필요"}{" "}
@@ -267,7 +269,7 @@ export function AdminDashboard({
                       failed: "발송 실패",
                     } as Record<string, string>
                   )[n.status] ?? n.status}{" "}
-                  · 시도 {n.attempts}회
+                  · 실패 {n.attempts}회
                 </span>
               </li>
             ))}
