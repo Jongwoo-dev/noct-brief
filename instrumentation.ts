@@ -7,10 +7,13 @@ export async function register() {
       return;
     const { readConfig } = await import("./lib/config");
     const c = readConfig();
-    if (c.APP_ENV !== "production" || !c.AUTO_PUBLISH_ENABLED) return;
+    if (
+      c.APP_ENV !== "production" ||
+      !(c.AUTO_PUBLISH_ENABLED || c.AUTO_BACKUP_ENABLED)
+    )
+      return;
 
-    const { startPublishingSchedule } =
-      await import("./lib/publishing-schedule");
-    startPublishingSchedule();
+    const { startServerSchedules } = await import("./lib/server-schedules");
+    startServerSchedules(c);
   }
 }

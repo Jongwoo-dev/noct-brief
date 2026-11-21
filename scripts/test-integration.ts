@@ -516,16 +516,23 @@ try {
     calls++;
     return Response.json({ ok: true });
   };
-  await drainNotifications(db, c, request, now());
+  await drainNotifications(db, c, "report", request, now());
   assert.equal(calls, 0);
   const prod = {
     ...c,
     APP_ENV: "production" as const,
+    AUTO_PUBLISH_ENABLED: true,
     TELEGRAM_ENABLED: true,
     TELEGRAM_BOT_TOKEN: "test-only",
     TELEGRAM_CHAT_ID: "test-only",
   };
-  await drainNotifications(db, prod, request, new Date(Date.now() + 86400000));
+  await drainNotifications(
+    db,
+    prod,
+    "report",
+    request,
+    new Date(Date.now() + 86400000),
+  );
   assert.ok(calls > 0);
   check("예외 알림 중복 억제·로컬 발송 차단·모의 전송");
   // Public archive fixtures are written only to this test-created isolated database.

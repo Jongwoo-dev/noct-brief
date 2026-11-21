@@ -101,6 +101,10 @@ describe("환경·권한", () => {
       readConfig({ DATABASE_URL: "postgresql://a:b@localhost/prod" }),
     ).toThrow();
   });
+  it("자동 백업은 기본 꺼짐이며 로컬 활성화를 거부한다", () => {
+    expect(readConfig({}).AUTO_BACKUP_ENABLED).toBe(false);
+    expect(() => readConfig({ AUTO_BACKUP_ENABLED: "true" })).toThrow("로컬");
+  });
   it("운영 자동 발행은 외부 호출 활성화가 필요", () => {
     const env = {
       APP_ENV: "production",

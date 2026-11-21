@@ -1,6 +1,6 @@
 import { runtime, jobConfig } from "./runtime";
 import { dueSlots } from "./calendar";
-import { checkBackupAge, drainNotifications } from "./notifications";
+import { drainNotifications } from "./notifications";
 export async function runTick(manualSample = false) {
   const { c, db, repo, worker } = await runtime();
   if (
@@ -23,8 +23,7 @@ export async function runTick(manualSample = false) {
   for (let i = 0; i < 8; i++)
     if ((await worker.tick(new Date())) === "idle") break;
   await worker.detectDelays(now);
-  if (c.APP_ENV === "production") await checkBackupAge(db, now);
-  await drainNotifications(db, c);
+  await drainNotifications(db, c, "report");
   await db.query(
     `INSERT INTO app_settings(key,value) VALUES('last_scheduler',$1) ON CONFLICT(key)
      DO UPDATE SET value=EXCLUDED.value WHERE app_settings.value::timestamptz < EXCLUDED.value::timestamptz`,

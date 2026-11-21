@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type pg from "pg";
 import type { Config } from "./config";
+import { assertDatabase, pool } from "./db";
 export async function checkBackupAge(db: pg.Pool, now: Date) {
   await db.query(
     "INSERT INTO app_settings(key,value) VALUES('backup_monitor_since',$1) ON CONFLICT DO NOTHING",
@@ -21,15 +22,23 @@ export async function checkBackupAge(db: pg.Pool, now: Date) {
 export async function drainNotifications(
   db: pg.Pool,
   c: Config,
+  scope: "backup" | "report",
   request: typeof fetch = fetch,
   now = new Date(),
 ) {
-  if (c.APP_ENV !== "production" || !c.TELEGRAM_ENABLED)
+  const enabled =
+    scope === "backup" ? c.AUTO_BACKUP_ENABLED : c.AUTO_PUBLISH_ENABLED;
+  if (c.APP_ENV !== "production" || !c.TELEGRAM_ENABLED || !enabled)
     return { sent: 0, disabled: true };
   const owner = randomUUID();
   const r = await db.query(
-    `WITH selected AS (SELECT id FROM notification_outbox WHERE status='pending' AND next_at<=$1 AND (lease_until IS NULL OR lease_until<=$1) ORDER BY next_at LIMIT 5 FOR UPDATE SKIP LOCKED) UPDATE notification_outbox n SET owner=$2,lease_until=$1::timestamptz+interval '60 seconds' FROM selected s WHERE n.id=s.id RETURNING n.*`,
-    [now, owner],
+    `WITH selected AS (
+       SELECT id FROM notification_outbox WHERE status='pending' AND next_at<=$1
+       AND ((kind IN ('backup','backup_stale')) = $3::boolean)
+       AND (lease_until IS NULL OR lease_until<=$1)
+       ORDER BY next_at,id LIMIT 5 FOR UPDATE SKIP LOCKED
+     ) UPDATE notification_outbox n SET owner=$2,lease_until=$1::timestamptz+interval '60 seconds' FROM selected s WHERE n.id=s.id RETURNING n.*`,
+    [now, owner, scope === "backup"],
   );
   let sent = 0;
   for (const row of r.rows) {
@@ -70,4 +79,15 @@ export async function drainNotifications(
     sent += saved.rowCount ?? 0;
   }
   return { sent, disabled: false };
+}
+
+export async function runBackupMonitor(c: Config) {
+  if (c.APP_ENV !== "production" || !c.AUTO_BACKUP_ENABLED) return;
+  const db = pool();
+  await assertDatabase(db, c.APP_ENV, c.DATA_MODE);
+  try {
+    await checkBackupAge(db, new Date());
+  } finally {
+    await drainNotifications(db, c, "backup");
+  }
 }

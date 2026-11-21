@@ -202,12 +202,13 @@ async function notifications(db: pg.Pool, c: Config, check: Check) {
   const prod = {
     ...c,
     APP_ENV: "production" as const,
+    AUTO_PUBLISH_ENABLED: true,
     TELEGRAM_ENABLED: true,
     TELEGRAM_BOT_TOKEN: "test-only",
     TELEGRAM_CHAT_ID: "test-only",
   };
   const ok = async () => Response.json({ ok: true });
-  while ((await drainNotifications(db, prod, ok, start)).sent > 0) {}
+  while ((await drainNotifications(db, prod, "report", ok, start)).sent > 0) {}
   const repo = new Repository(db, "sample");
   const id = "2026-10-23-pre";
   await repo.notify(id, "retry_test", "모의 발송 오류", start);
@@ -220,17 +221,18 @@ async function notifications(db: pg.Pool, c: Config, check: Check) {
     await drainNotifications(
       db,
       prod,
+      "report",
       reject,
       new Date(at(minute).getTime() - 1),
     );
     assert.equal(calls, attempt);
     await Promise.all([
-      drainNotifications(db, prod, reject, at(minute)),
-      drainNotifications(db, prod, reject, at(minute)),
+      drainNotifications(db, prod, "report", reject, at(minute)),
+      drainNotifications(db, prod, "report", reject, at(minute)),
     ]);
     assert.equal(calls, attempt + 1);
   }
-  await drainNotifications(db, prod, reject, at(80));
+  await drainNotifications(db, prod, "report", reject, at(80));
   assert.equal(calls, 4);
   const overview = await adminOverview(db, "all", "", 1);
   assert.ok(
@@ -241,9 +243,15 @@ async function notifications(db: pg.Pool, c: Config, check: Check) {
   );
   check("모의 전송 동시 실행·1/5/15분 재시도·최종 실패 관리자 조회");
   await repo.notify(id, "recovery_test", "모의 재전송", at(81));
-  await drainNotifications(db, prod, reject, at(81));
-  assert.equal((await drainNotifications(db, prod, ok, at(82))).sent, 1);
-  assert.equal((await drainNotifications(db, prod, ok, at(83))).sent, 0);
+  await drainNotifications(db, prod, "report", reject, at(81));
+  assert.equal(
+    (await drainNotifications(db, prod, "report", ok, at(82))).sent,
+    1,
+  );
+  assert.equal(
+    (await drainNotifications(db, prod, "report", ok, at(83))).sent,
+    0,
+  );
   check("일시적 전송 실패 후 재전송 성공·발송 완료 건 재전송 억제");
   await checkBackupAge(db, start);
   await checkBackupAge(db, new Date(at(26 * 60).getTime() - 1));
@@ -266,6 +274,46 @@ async function notifications(db: pg.Pool, c: Config, check: Check) {
   await checkBackupAge(db, at(53 * 60));
   assert.equal(await countStale(), 2);
   check("최초 감시와 최근 백업 각각 26시간 경계·중복 억제");
+  const backupOnly = {
+    ...prod,
+    AUTO_PUBLISH_ENABLED: false,
+    AUTO_BACKUP_ENABLED: true,
+  };
+  const retryAt = at(54 * 60);
+  await repo.notify(id, "report_scope_test", "리포트 오류 시험", retryAt);
+  assert.equal(
+    (await drainNotifications(db, prod, "backup", ok, retryAt)).disabled,
+    true,
+  );
+  assert.equal(
+    (await drainNotifications(db, backupOnly, "report", ok, retryAt)).disabled,
+    true,
+  );
+  const both = { ...prod, AUTO_BACKUP_ENABLED: true };
+  assert.equal(
+    (await drainNotifications(db, both, "report", ok, retryAt)).sent,
+    1,
+  );
+  await repo.notify(id, "report_scope_pending", "리포트 재전송 시험", retryAt);
+  await drainNotifications(db, backupOnly, "backup", reject, retryAt);
+  assert.equal(
+    (await drainNotifications(db, backupOnly, "backup", ok, at(54 * 60 + 1)))
+      .sent,
+    2,
+  );
+  assert.equal(
+    (
+      await db.query(
+        "SELECT status FROM notification_outbox WHERE kind='report_scope_pending'",
+      )
+    ).rows[0].status,
+    "pending",
+  );
+  assert.equal(
+    (await drainNotifications(db, prod, "report", ok, at(54 * 60 + 1))).sent,
+    1,
+  );
+  check("발행 중지 중 백업 경보만 재전송·백업 중지 중 발행 경보만 전송");
 }
 
 async function backupRestore(
@@ -279,6 +327,29 @@ async function backupRestore(
     .rows[0].name as string;
   assert.match(sourceName, /^noct_test_[a-f0-9]{32}_local$/);
   assert.equal(url.pathname, "/" + sourceName);
+  const runBackupCLI = (local: boolean, enabled: boolean) =>
+    exec(process.execPath, ["--import", "tsx", "scripts/ops/backup.ts"], {
+      env: {
+        ...process.env,
+        APP_ENV: local ? "local" : "production",
+        DATA_MODE: local ? "sample" : "live",
+        BETTER_AUTH_URL: "https://example.invalid",
+        DATABASE_URL: "postgresql://127.0.0.1:1/unavailable_local",
+        AUTO_BACKUP_ENABLED: String(enabled),
+        AUTO_PUBLISH_ENABLED: "false",
+        EXTERNAL_CALLS_ENABLED: "false",
+        TELEGRAM_ENABLED: "false",
+        BACKUP_BUCKET: "",
+      },
+    });
+  for (const local of [true, false]) {
+    const result = await runBackupCLI(local, false);
+    assert.equal(result.stdout.trim(), "");
+  }
+  await assert.rejects(runBackupCLI(true, true), /로컬에서는/);
+  check(
+    "자동 백업 OFF이면 운영·로컬 CLI가 DB와 버킷 없이 종료하고 로컬 ON은 거부",
+  );
   const restored = sourceName + "_restored";
   const dest = new URL(url);
   dest.pathname = "/" + restored;

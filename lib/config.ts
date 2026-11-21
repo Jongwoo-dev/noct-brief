@@ -7,6 +7,7 @@ const schema = z.object({
   APP_ENV: z.enum(["local", "production"]).default("local"),
   DATA_MODE: z.enum(["sample", "live"]).default("sample"),
   AUTO_PUBLISH_ENABLED: flag,
+  AUTO_BACKUP_ENABLED: flag,
   TELEGRAM_ENABLED: flag,
   EXTERNAL_CALLS_ENABLED: flag,
   DATABASE_URL: z.string().default(""),
@@ -50,9 +51,11 @@ export function readConfig(
     );
   if (
     c.APP_ENV !== "production" &&
-    (c.AUTO_PUBLISH_ENABLED || c.TELEGRAM_ENABLED)
+    (c.AUTO_PUBLISH_ENABLED || c.AUTO_BACKUP_ENABLED || c.TELEGRAM_ENABLED)
   )
-    throw new Error("로컬에서는 자동 발행·운영 알림을 활성화할 수 없습니다.");
+    throw new Error(
+      "로컬에서는 자동 발행·자동 백업·운영 알림을 활성화할 수 없습니다.",
+    );
   if (c.DATABASE_URL) {
     let u: URL;
     try {

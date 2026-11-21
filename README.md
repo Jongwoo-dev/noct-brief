@@ -84,6 +84,7 @@ npm run dev
 | `OPENAI_REASONING_EFFORT`, `OPENAI_MAX_OUTPUT_TOKENS` | 기본 medium/8000, 회차별 설정 저장 |
 | `MARKET_DATA_PROVIDER`, `MARKET_DATA_API_KEY` | 공급원 확정 후 연결할 예약 항목; 현재 직접 API 수집기 미연결 |
 | `AUTO_PUBLISH_ENABLED` | 운영 Node.js 서버가 시작할 때 발행 작업을 등록합니다. production/live에서 `EXTERNAL_CALLS_ENABLED=true`일 때 활성화할 수 있습니다. |
+| `AUTO_BACKUP_ENABLED` | 운영 일일 DB 백업, 26시간 누락 점검, 백업 예외 알림 재시도를 함께 켭니다. 발행 설정과 독립이며 기본값은 `false`입니다. 로컬에서는 자동 발행과 자동 백업을 모두 끕니다. |
 | `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | 운영 예외 알림만. 로컬 활성화 차단 |
 | `BACKUP_BUCKET`, `PG_CLIENT_BIN` | 외부 백업 버킷과 PostgreSQL 클라이언트 경로. AWS CLI 인증 별도 |
 | `RESTORE_DATABASE_URL`, `CONFIRM_RESTORE` | 현재 앱 DB와 분리되고 다른 연결이 없는 빈 DB 복원. 확인 값 empty-database |

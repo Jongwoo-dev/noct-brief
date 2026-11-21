@@ -87,7 +87,7 @@ export async function backupDatabase(
       "INSERT INTO notification_outbox(id,dedupe_key,kind,message,next_at) VALUES(gen_random_uuid(),$1,'backup','DB 외부 백업 실패. 최근 성공 시각을 확인하세요.',$2) ON CONFLICT DO NOTHING",
       [`backup:${now.toISOString().slice(0, 10)}`, now],
     );
-    await drainNotifications(db, c);
+    await drainNotifications(db, c, "backup");
     throw new Error("DB 백업 실패");
   } finally {
     if (dir) {
@@ -99,13 +99,9 @@ export async function backupDatabase(
   }
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+async function runScheduledBackup() {
   const c = readConfig();
-  if (c.APP_ENV !== "production")
-    throw new Error("백업은 운영 환경에서만 실행합니다.");
+  if (!c.AUTO_BACKUP_ENABLED) return;
   const db = pool();
   try {
     await backupDatabase(
@@ -124,3 +120,5 @@ if (
     await db.end();
   }
 }
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  await runScheduledBackup();
