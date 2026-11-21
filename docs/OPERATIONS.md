@@ -12,6 +12,8 @@
 
 ## 릴리스와 업데이트
 
+운영 단계에서 GitHub Actions에 수동 배포 워크플로를 추가한다. 배포 트리거는 `workflow_dispatch`만 사용한다. 사용자가 **Actions → 운영 배포 → Run workflow**에서 `main`으로 실행했을 때 배포하며, 배포 작업은 `refs/heads/main`에서만 진행한다. 실행 시점의 커밋 SHA를 테스트·Linux 빌드·릴리스 전송·서버 전환까지 동일하게 사용한다. 현재 저장소에는 패키징과 서버 전환 스크립트가 있으며 Actions 연결과 운영 검증은 남아 있다. [GitHub 수동 실행 안내](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)
+
 Linux 빌드 환경에서 `npm ci`, `npm run typecheck`, `npm test`, `npm run build`, `npm run release:package`를 수행한다. 실제 DB 검증은 별도 로컬 테스트 DB에서 수행한다. Windows 산출물은 Linux 배포용이 아니다.
 
 생성된 묶음을 새 `/opt/noct/releases/릴리스명`에 배치하고 해당 디렉터리에서 `npm ci --omit=dev`를 실행한다. 마이그레이션과 백업·복원 스크립트는 tsx를 사용한다. standalone 웹 서버와 별도로 작업 스크립트·마이그레이션·정적 파일이 있어야 한다. 릴리스에는 환경 파일·DB 파일·비밀 자료를 포함하지 않으며 manifest를 확인한다.
