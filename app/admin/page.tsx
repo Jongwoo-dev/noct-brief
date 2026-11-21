@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { identity, getAuth } from "@/lib/auth";
@@ -55,11 +54,6 @@ export default async function Admin({
               공개 브리핑은 로그인 없이 읽을 수 있습니다.
             </p>
           </div>
-        )}
-        {sample && (
-          <Link className="admin-preview-link" href="/admin/preview">
-            가상 자료로 관리자 화면 둘러보기 →
-          </Link>
         )}
       </main>
     );

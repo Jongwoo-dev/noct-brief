@@ -50,37 +50,24 @@ function Status({ edition }: { edition: AdminEdition }) {
   );
 }
 function Header({
-  preview,
   title,
   description,
 }: {
-  preview: boolean;
   title: string;
   description: string;
 }) {
   return (
-    <>
-      <header className="admin-heading">
-        <div>
-          <p className="eyebrow">NOCT CONTROL</p>
-          <h1>{title}</h1>
-          <p>{description}</p>
-        </div>
-        <div className="button-row">
-          <RefreshAdmin />
-          {!preview && <SignOut />}
-        </div>
-      </header>
-      {preview && (
-        <aside className="sample-banner">
-          <span className="badge">관리자 화면 시연</span>
-          <p>
-            고정된 가상 자료입니다. 실제 계정·저장 데이터·발행 상태에는 영향을
-            주지 않습니다.
-          </p>
-        </aside>
-      )}
-    </>
+    <header className="admin-heading">
+      <div>
+        <p className="eyebrow">NOCT CONTROL</p>
+        <h1>{title}</h1>
+        <p>{description}</p>
+      </div>
+      <div className="button-row">
+        <RefreshAdmin />
+        <SignOut />
+      </div>
+    </header>
   );
 }
 export function AdminDashboard({
@@ -92,8 +79,7 @@ export function AdminDashboard({
   page,
   lastScheduler,
   sample,
-  preview = false,
-  notices = [],
+  notices,
 }: {
   editions: AdminEdition[];
   counts: {
@@ -108,16 +94,14 @@ export function AdminDashboard({
   page: number;
   lastScheduler: string | null;
   sample: boolean;
-  preview?: boolean;
-  notices?: AdminNotice[];
+  notices: AdminNotice[];
 }) {
-  const base = preview ? "/admin/preview" : "/admin";
+  const base = "/admin";
   const url = (selected: AdminFilter, n = 1) =>
     `${base}?${new URLSearchParams({ filter: selected, ...(date ? { date } : {}), ...(n > 1 ? { page: String(n) } : {}) })}`;
   return (
     <main id="main" className="home admin">
       <Header
-        preview={preview}
         title="브리핑 운영"
         description="처리 상태를 확인하고, 발행된 보고서와 수정 이력을 관리합니다."
       />
@@ -145,7 +129,7 @@ export function AdminDashboard({
           {lastScheduler ? `${kst(lastScheduler)} KST` : "기록 없음"}
         </span>
       </p>
-      {sample && <SampleTools preview={preview} />}
+      {sample && <SampleTools />}
       <section aria-labelledby="editions-heading" className="admin-editions">
         <div className="section-heading">
           <h2 id="editions-heading">회차별 관리</h2>
@@ -187,13 +171,7 @@ export function AdminDashboard({
                 <div className="admin-edition-body">
                   <Status edition={b} />
                   <h3>
-                    <Link
-                      href={
-                        preview
-                          ? `${base}?id=${b.id}`
-                          : `/admin/briefings/${b.id}`
-                      }
-                    >
+                    <Link href={`/admin/briefings/${b.id}`}>
                       {b.title ?? `${sessionLabel(b.session)} 브리핑 준비`}
                     </Link>
                   </h3>
@@ -211,9 +189,7 @@ export function AdminDashboard({
                 </div>
                 <Link
                   className="admin-open"
-                  href={
-                    preview ? `${base}?id=${b.id}` : `/admin/briefings/${b.id}`
-                  }
+                  href={`/admin/briefings/${b.id}`}
                   aria-label={`${b.date} ${sessionLabel(b.session)} 상세 관리`}
                 >
                   상세 관리 <UiIcon name="forward" />
@@ -448,25 +424,20 @@ export function AdminEditionDetail({
   versions,
   selected,
   jobs,
-  preview = false,
 }: {
   edition: AdminEdition;
   versions: VersionInfo[];
   selected: AdminVersion | null;
   jobs: AdminJob[];
-  preview?: boolean;
 }) {
-  const base = preview
-    ? `/admin/preview?id=${edition.id}`
-    : `/admin/briefings/${edition.id}`;
+  const base = `/admin/briefings/${edition.id}`;
   return (
     <main id="main" className="home admin admin-detail">
-      <Link className="back" href={preview ? "/admin/preview" : "/admin"}>
+      <Link className="back" href="/admin">
         <UiIcon name="back" />
         운영 목록
       </Link>
       <Header
-        preview={preview}
         title={`${edition.date} ${sessionLabel(edition.session)}`}
         description={edition.title ?? "아직 저장된 발행본이 없습니다."}
       />
@@ -495,7 +466,7 @@ export function AdminEditionDetail({
           ) : (
             <p>작업 기록이 없습니다.</p>
           )}
-          <AdminControls key={edition.id} edition={edition} preview={preview} />
+          <AdminControls key={edition.id} edition={edition} />
         </section>
         <section className="admin-history">
           <h2>보관된 보고서</h2>
@@ -508,7 +479,7 @@ export function AdminEditionDetail({
               {versions.map((v, i) => (
                 <li key={v.id}>
                   <Link
-                    href={`${base}${preview ? "&" : "?"}version=${v.id}`}
+                    href={`${base}?version=${v.id}`}
                     aria-current={selected?.id === v.id ? "page" : undefined}
                   >
                     <strong>
@@ -528,7 +499,7 @@ export function AdminEditionDetail({
                 : "검증·발행을 마치면 여기에 보관됩니다."}
             </p>
           )}
-          {!preview && edition.visible && (
+          {edition.visible && (
             <Link className="admin-open" href={`/briefings/${edition.id}`}>
               공개 화면 보기 <UiIcon name="forward" />
             </Link>

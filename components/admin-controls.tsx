@@ -65,13 +65,7 @@ export function RefreshAdmin() {
     </button>
   );
 }
-export function AdminControls({
-  edition,
-  preview = false,
-}: {
-  edition: AdminEdition;
-  preview?: boolean;
-}) {
+export function AdminControls({ edition }: { edition: AdminEdition }) {
   const [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
   const [failed, setFailed] = useState(false),
@@ -80,7 +74,7 @@ export function AdminControls({
   const router = useRouter();
   const actions = adminActions(edition);
   async function send(action: string, fields: Record<string, string> = {}) {
-    if (preview || pending.current) return;
+    if (pending.current) return;
     pending.current = true;
     setBusy(true);
     setMessage("");
@@ -132,14 +126,11 @@ export function AdminControls({
   return (
     <section className="admin-controls" aria-label="보고서 관리">
       <h2>관리 작업</h2>
-      {preview && (
-        <p className="meta">화면 시연에서는 저장·실행 버튼이 비활성화됩니다.</p>
-      )}
       <div className="button-row">
         {actions.retry && (
           <button
             className="primary-action"
-            disabled={busy || preview}
+            disabled={busy}
             onClick={() => void send("retry")}
           >
             실패 작업 재시도
@@ -168,7 +159,7 @@ export function AdminControls({
           </p>
           <div className="button-row">
             <button
-              disabled={busy || preview}
+              disabled={busy}
               onClick={() => void send(edition.visible ? "hide" : "restore")}
             >
               {edition.visible ? "비공개 전환 확인" : "공개 복구 확인"}
@@ -212,7 +203,7 @@ export function AdminControls({
               });
             }}
           >
-            <fieldset disabled={busy || !actions.correct || preview}>
+            <fieldset disabled={busy || !actions.correct}>
               <label>
                 잘못된 항목
                 <textarea
@@ -244,7 +235,7 @@ export function AdminControls({
               </label>
               <button
                 className="primary-action"
-                disabled={busy || !actions.correct || preview}
+                disabled={busy || !actions.correct}
               >
                 정정 요청 저장
               </button>
@@ -264,13 +255,13 @@ export function AdminControls({
     </section>
   );
 }
-export function SampleTools({ preview = false }: { preview?: boolean }) {
+export function SampleTools() {
   const [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
   const pending = useRef(false);
   const router = useRouter();
   async function run(action: "enqueue" | "step", form?: FormData) {
-    if (preview || pending.current) return;
+    if (pending.current) return;
     pending.current = true;
     setBusy(true);
     setMessage("");
@@ -314,20 +305,20 @@ export function SampleTools({ preview = false }: { preview?: boolean }) {
             name="date"
             required
             defaultValue="2026-10-28"
-            disabled={busy || preview}
+            disabled={busy}
           />
         </label>
         <label>
           세션
-          <select name="session" disabled={busy || preview}>
+          <select name="session" disabled={busy}>
             <option value="pre">장전</option>
             <option value="post">장후</option>
           </select>
         </label>
-        <button disabled={busy || preview}>테스트 회차 등록</button>
+        <button disabled={busy}>테스트 회차 등록</button>
       </form>
       <div className="button-row">
-        <button disabled={busy || preview} onClick={() => void run("step")}>
+        <button disabled={busy} onClick={() => void run("step")}>
           대기 작업 한 단계 진행
         </button>
       </div>
@@ -335,11 +326,6 @@ export function SampleTools({ preview = false }: { preview?: boolean }) {
         동일 회차는 중복 등록하지 않습니다. 단계 진행은 처리 시각이 된 작업
         하나에 적용되며, 발행 목표 전에는 공개되지 않습니다.
       </p>
-      {preview && (
-        <p className="meta">
-          실제 조작은 로그인한 로컬 샘플 관리자에서 사용할 수 있습니다.
-        </p>
-      )}
       {message && <p role="status">{message}</p>}
     </details>
   );

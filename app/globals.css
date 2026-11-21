@@ -1175,14 +1175,6 @@ th {
   font-size: 14px;
   min-height: 42px;
 }
-.admin-preview-link {
-  display: inline-block;
-  margin-top: 24px;
-  color: var(--action);
-}
-.admin > .sample-banner {
-  margin-bottom: 24px;
-}
 .admin-overview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

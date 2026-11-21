@@ -55,7 +55,9 @@ export const stateLabels: Record<JobState, string> = {
   published: "처리 완료",
 };
 export function adminActions(
-  edition: Pick<AdminEdition, "version" | "job" | "missedAt">,
+  edition: Pick<AdminEdition, "version" | "missedAt"> & {
+    job: Pick<AdminJob, "kind" | "state" | "errorCode" | "baseVersion"> | null;
+  },
 ) {
   const j = edition.job;
   const active = !!j && !["failed", "published"].includes(j.state);
@@ -117,11 +119,4 @@ export function adminSearch(
     page:
       Number.isSafeInteger(number) && number > 0 ? Math.min(number, 100000) : 1,
   };
-}
-export function matchesAdminFilter(b: AdminEdition, filter: AdminFilter) {
-  if (filter === "attention") return b.job?.state === "failed";
-  if (filter === "progress")
-    return !!b.job && !["failed", "published"].includes(b.job.state);
-  if (filter === "stored") return !!b.version;
-  return true;
 }

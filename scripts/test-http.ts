@@ -66,7 +66,9 @@ if (authConfigured(config)) {
   if (new URL(admin.url).origin !== authOrigin)
     assert.ok(body.includes(`NEXT_REDIRECT;replace;${authOrigin}/admin;307;`));
   const canonicalAdmin = await fetch(`${authOrigin}/admin`);
-  assert.match(await canonicalAdmin.text(), /Google로 로그인/);
+  const loginPage = await canonicalAdmin.text();
+  assert.match(loginPage, /Google로 로그인/);
+  assert.doesNotMatch(loginPage, /\/admin\/preview|관리자 화면 둘러보기/);
   for (const headers of [
     { origin: "https://foreign.example", "content-type": "application/json" },
     { "content-type": "application/json" },
@@ -126,9 +128,7 @@ if (privateDetail.status === 307) {
     /보관된 보고서 내용|실패 작업 재시도|정정 요청 저장/,
   );
 }
-const preview = await fetch(`${base}/admin/preview`);
-assert.equal(preview.status, 200);
-assert.match(await preview.text(), /관리자 화면 시연/);
+assert.equal((await fetch(`${base}/admin/preview`)).status, 404);
 const sampleCommand = await fetch(`${base}/api/admin/sample`, {
   method: "POST",
   headers: {
