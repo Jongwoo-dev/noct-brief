@@ -1,5 +1,6 @@
 import Link from "next/link";
 import { kst, sessionLabel } from "@/lib/calendar";
+import { eventTimeLabel } from "@/lib/contract";
 import {
   adminFilters,
   errorExplanation,
@@ -280,7 +281,7 @@ function JobDetails({ job }: { job: AdminJob }) {
         <div>
           <dt>다음 처리</dt>
           <dd>
-            {["failed", "published"].includes(job.state)
+            {["failed", "published", "stopped"].includes(job.state)
               ? "예약 없음"
               : `${kst(job.nextAt)} KST`}
           </dd>
@@ -380,7 +381,7 @@ function StoredReport({ version }: { version: AdminVersion }) {
           <h3>예정과 결과</h3>
           {c.bundle.events.map((e) => (
             <p key={e.id}>
-              <strong>{e.title}</strong> · {kst(e.scheduledAt)} KST
+              <strong>{e.title}</strong> · {eventTimeLabel(e)}
               <br />
               {e.result || e.watch}
             </p>

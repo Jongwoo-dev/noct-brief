@@ -8,7 +8,7 @@ const schema = z.discriminatedUnion("action", [
   z.object({
     action: z.literal("enqueue"),
     date: z.iso.date(),
-    session: z.enum(["pre", "post"]),
+    session: z.literal("post").default("post"),
   }),
   z.object({ action: z.literal("step") }),
 ]);

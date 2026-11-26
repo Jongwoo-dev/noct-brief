@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readConfig } from "../lib/config";
 import { migrate } from "./migrate";
 import { Repository, type Job } from "../lib/repository";
-import { dueSlots } from "../lib/calendar";
+import { dueSlots, schedule, type Session } from "../lib/calendar";
 import { Worker } from "../lib/worker";
 import { sampleContent } from "../data/samples";
 import {
@@ -16,7 +16,9 @@ import {
 import { drainNotifications } from "../lib/notifications";
 import { assertDatabase } from "../lib/db";
 import { checkOperationalFlows } from "./test-operations";
+import { checkTrialLedger } from "./test-trial-ledger";
 import { adminDetail, adminOverview } from "../lib/admin-queries";
+import { pairedTimePolicy } from "../lib/report-time";
 const c = readConfig();
 if (c.APP_ENV !== "local" || c.DATA_MODE !== "sample" || !c.DATABASE_URL)
   throw new Error("npm run db:local로 전용 로컬 DB를 준비하세요.");
@@ -39,8 +41,29 @@ const config: Job["config"] = {
   maxOutputTokens: 8000,
   promptVersion: "noct-v1",
 };
+const pairedConfig: Job["config"] = {
+  ...config,
+  promptVersion: "noct-v2-kst-original",
+  timePolicy: pairedTimePolicy,
+};
 const repo = new Repository(db, "sample");
 const now = () => new Date(Date.now() + 5000);
+async function storeEdition(date: string, session: Session) {
+  const slot = schedule(date, session);
+  const version = randomUUID();
+  await db.query(
+    "INSERT INTO briefings(id,us_trading_date,session,target_at) VALUES($1,$2,$3,$4)",
+    [slot.id, date, session, slot.targetAt],
+  );
+  await db.query(
+    "INSERT INTO briefing_versions(id,briefing_id,content,created_at,config,validated) VALUES($1,$2,$3,$4,$5,true)",
+    [version, slot.id, sampleContent(date, session), slot.targetAt, config],
+  );
+  await db.query(
+    "UPDATE briefings SET current_version_id=$1,visible=true,published_at=$2 WHERE id=$3",
+    [version, slot.targetAt, slot.id],
+  );
+}
 function providers(date: string, session: "pre" | "post", pending = false) {
   const content = sampleContent(date, session);
   let submits = 0;
@@ -83,9 +106,10 @@ try {
   await assertDatabase(db, "local");
   await assert.rejects(() => assertDatabase(db, "production"));
   check("마이그레이션 재실행과 환경 표식");
+  await checkTrialLedger(db, check);
   await Promise.all(
     Array.from({ length: 5 }, () =>
-      repo.enqueue("2026-10-23", "pre", config, now()),
+      repo.enqueue("2026-10-26", "post", pairedConfig, now()),
     ),
   );
   assert.equal(
@@ -93,14 +117,23 @@ try {
     "1",
   );
   check("중복 예약 유일 제약");
-  const p = providers("2026-10-23", "pre"),
+  const p = providers("2026-10-26", "post"),
     w = new Worker(repo, p.collector, p.generator);
   await finish(w, now());
   assert.equal((await repo.publicList()).length, 1);
   assert.equal(p.submits(), 1);
+  assert.equal(
+    (await repo.publicDetail("2026-10-26-post"))?.content.timePolicy,
+    pairedTimePolicy,
+  );
   check("수집→생성→검증→트랜잭션 공개");
+  await db.query(
+    "UPDATE briefings SET visible=false WHERE id='2026-10-26-post'",
+  );
+  await storeEdition("2026-10-23", "pre");
   const original = (await repo.publicDetail("2026-10-23-pre"))!;
   assert.ok(original);
+  assert.equal((await repo.ensureSlot("2026-10-23", "pre")).id, original.id);
   const command = {
     id: randomUUID(),
     briefingId: original.id,
@@ -130,9 +163,18 @@ try {
       issue: "제목의 표현",
       evidenceUrl: "https://example.com/noct-sample",
     },
-    config,
+    pairedConfig,
     now(),
   );
+  const correctionConfig = (
+    await db.query(
+      "SELECT config FROM jobs WHERE briefing_id=$1 AND kind='correction'",
+      [original.id],
+    )
+  ).rows[0].config;
+  assert.equal(correctionConfig.promptVersion, "noct-v1");
+  assert.equal(correctionConfig.timePolicy, undefined);
+  check("신규 회차 시각 정책 저장·기존 원고 정정 시 원래 프롬프트 유지");
   assert.equal(
     (await repo.publicDetail(original.id))!.versionId,
     original.versionId,
@@ -375,15 +417,15 @@ try {
     /RETRY_NOT_AVAILABLE/,
   );
   check("외부 접수 불명 자동·수동 중복 요청 차단");
-  await repo.enqueue("2026-10-22", "pre", config, now());
-  const retry = providers("2026-10-22", "pre");
+  await repo.enqueue("2026-10-27", "post", config, now());
+  const retry = providers("2026-10-27", "post");
   retry.generator.submit = async () => {
     throw new ProviderError("HTTP_429", true, 180);
   };
   const rw = new Worker(repo, retry.collector, retry.generator);
   await rw.tick(now());
   let r = (
-    await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-22-pre'")
+    await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-27-post'")
   ).rows[0];
   assert.equal(r.state, "retry_wait");
   assert.equal(r.attempt, 1);
@@ -391,7 +433,7 @@ try {
   for (let i = 0; i < 3; i++) {
     await rw.tick(new Date(r.next_at.getTime() + 1000));
     r = (
-      await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-22-pre'")
+      await db.query("SELECT * FROM jobs WHERE briefing_id='2026-10-27-post'")
     ).rows[0];
   }
   assert.equal(r.state, "failed");
@@ -436,21 +478,25 @@ try {
   );
   assert.equal(wait.submits(), 1);
   check("콜 대기·무변경 재생성 억제·장애 알림 제외·한 시간 후 축소 공개");
-  await repo.enqueue("2026-10-20", "pre", config, now());
-  const early = providers("2026-10-20", "pre"),
+  await db.query(
+    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-21-post'",
+    [schedule("2026-10-21", "post").targetAt],
+  );
+  await repo.enqueue("2026-10-20", "post", config, now());
+  const early = providers("2026-10-20", "post"),
     ew = new Worker(repo, early.collector, early.generator);
   const future = new Date(Date.now() + 3600000);
   await db.query(
-    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-20-pre'",
+    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-20-post'",
     [future],
   );
   await finish(ew, now(), 4);
-  assert.equal(await repo.publicDetail("2026-10-20-pre"), null);
+  assert.equal(await repo.publicDetail("2026-10-20-post"), null);
   await ew.detectDelays(new Date(future.getTime() + 15 * 60000 - 1));
   const delayCount = async () =>
     (
       await db.query(
-        "SELECT id FROM notification_outbox WHERE dedupe_key='2026-10-20-pre:delay'",
+        "SELECT id FROM notification_outbox WHERE dedupe_key='2026-10-20-post:delay'",
       )
     ).rowCount;
   assert.equal(await delayCount(), 0);
@@ -459,29 +505,33 @@ try {
   assert.equal(await delayCount(), 1);
   check("기술 지연 15분 경계·콜 대기 60분 경계·반복 경보 억제");
   await ew.tick(new Date(future.getTime() + 1000));
-  assert.ok(await repo.publicDetail("2026-10-20-pre"));
+  assert.ok(await repo.publicDetail("2026-10-20-post"));
   check("미리 준비된 글의 목표 시각 이전 노출 방지");
+  await db.query(
+    "UPDATE briefings SET target_at=$1 WHERE id='2026-10-20-post'",
+    [schedule("2026-10-20", "post").targetAt],
+  );
   await assert.rejects(() =>
     db.query("UPDATE briefing_versions SET reason='changed' WHERE id=$1", [
       original.versionId,
     ]),
   );
-  await repo.enqueue("2026-10-19", "pre", config, now());
-  const repair = providers("2026-10-19", "pre");
+  await repo.enqueue("2026-10-19", "post", config, now());
+  const repair = providers("2026-10-19", "post");
   const invalidDraft = structuredClone(
-    sampleContent("2026-10-19", "pre").draft,
+    sampleContent("2026-10-19", "post").draft,
   );
   invalidDraft.summary[0].text = "근거 없는 수치 987654321";
   repair.generator.poll = async () => ({ status: "done", draft: invalidDraft });
   await finish(new Worker(repo, repair.collector, repair.generator), now(), 10);
   assert.equal(repair.submits(), 2);
   assert.equal(
-    (await repo.publicDetail("2026-10-19-pre"))!.content.reduced,
+    (await repo.publicDetail("2026-10-19-post"))!.content.reduced,
     true,
   );
   check("DB 버전 불변 제약·한 번 보정 후 검증 실패 축소본 공개");
-  await repo.enqueue("2026-10-16", "pre", config, now());
-  const update = providers("2026-10-16", "pre");
+  await repo.enqueue("2026-10-16", "post", config, now());
+  const update = providers("2026-10-16", "post");
   const first = update.collector.collect;
   update.collector.collect = async (...args) => ({
     ...(await first(...args)),
@@ -496,7 +546,7 @@ try {
   await finish(new Worker(repo, update.collector, update.generator), now(), 12);
   assert.equal(update.submits(), 2);
   assert.deepEqual(
-    (await repo.publicDetail("2026-10-16-pre"))!.content.bundle.missing,
+    (await repo.publicDetail("2026-10-16-post"))!.content.bundle.missing,
     ["갱신 확인 후에도 미확보한 자료"],
   );
   check("누락 자료가 있는 글도 공개 직전 변경 자료 반영");
@@ -547,16 +597,7 @@ try {
   ];
   for (const date of archiveDates) {
     for (const session of ["pre", "post"] as const) {
-      const slot = await repo.ensureSlot(date, session);
-      const version = randomUUID();
-      await db.query(
-        "INSERT INTO briefing_versions(id,briefing_id,content,created_at,config,validated) VALUES($1,$2,$3,$4,$5,true)",
-        [version, slot.id, sampleContent(date, session), slot.targetAt, config],
-      );
-      await db.query(
-        "UPDATE briefings SET current_version_id=$1,visible=true,published_at=$2 WHERE id=$3",
-        [version, slot.targetAt, slot.id],
-      );
+      await storeEdition(date, session);
     }
   }
   const firstDays = await repo.publicArchive({
@@ -643,7 +684,10 @@ try {
   await db.query(
     "UPDATE briefings SET visible=false WHERE id='2026-11-24-pre'",
   );
-  await repo.enqueue("2026-11-24", "pre", config, now());
+  await assert.rejects(
+    () => repo.enqueue("2026-11-24", "pre", config, now()),
+    /PRE_PUBLICATION_ENDED/,
+  );
   assert.equal(
     (await db.query("SELECT id FROM jobs WHERE briefing_id='2026-11-24-pre'"))
       .rowCount,
@@ -674,7 +718,14 @@ try {
   );
   check("거래일 페이지 경계·세션/날짜 필터·비공개 및 미검증 버전 제외");
   const backlogEnd = new Date("2026-06-30T12:00:00Z");
-  const backlog = dueSlots(backlogEnd, new Date("2026-06-01T00:00:00Z"));
+  const juneStart = new Date("2026-06-01T00:00:00Z");
+  const backlog = [
+    ...dueSlots(
+      new Date("2026-05-30T12:00:00Z"),
+      new Date("2026-05-01T00:00:00Z"),
+    ),
+    ...dueSlots(backlogEnd, juneStart),
+  ];
   assert.ok(backlog.length > 30);
   for (const { date, session } of backlog) await repo.ensureSlot(date, session);
   await w.detectDelays(new Date("2026-07-01T12:00:00Z"));

@@ -10,12 +10,15 @@ import {
 import { BundleSchema } from "./contract";
 import { sampleContent } from "../data/samples";
 import { Worker } from "./worker";
+import { pairedTimePolicy } from "./report-time";
 export function jobConfig(): Job["config"] {
   const c = readConfig();
   return {
     mode: c.DATA_MODE,
     model: c.DATA_MODE === "sample" ? "sample" : c.OPENAI_MODEL,
-    promptVersion: "noct-v1",
+    promptVersion:
+      c.DATA_MODE === "sample" ? "noct-v1" : "noct-v2-kst-original",
+    ...(c.DATA_MODE === "live" ? { timePolicy: pairedTimePolicy } : {}),
     reasoning: c.OPENAI_REASONING_EFFORT,
     maxOutputTokens: c.OPENAI_MAX_OUTPUT_TOKENS,
   };
@@ -54,7 +57,9 @@ export async function runtime() {
       }
       const input = await repo.latestBundle(
         job.briefing_id,
-        job.kind === "initial" ? job.target_at : undefined,
+        job.kind === "initial"
+          ? job.target_at
+          : new Date(job.payload.content!.bundle.cutoffAt),
       );
       if (!input)
         throw new ProviderError(
@@ -72,7 +77,8 @@ export async function runtime() {
         throw new ProviderError("STALE_COLLECTION");
       if (job.kind === "correction") {
         if (
-          bundle.cutoffAt !== job.payload.content?.bundle.cutoffAt ||
+          Date.parse(bundle.cutoffAt) !==
+            Date.parse(job.payload.content!.bundle.cutoffAt) ||
           !bundle.sources.some((s) => s.url === job.payload.evidenceUrl)
         )
           throw new ProviderError("CORRECTION_EVIDENCE_REQUIRED");
@@ -91,7 +97,7 @@ export async function runtime() {
                   (bundle.pendingCalls.length ? 3600000 : 0),
               ),
             )
-          : undefined;
+          : new Date(job.payload.content!.bundle.cutoffAt);
       const input = await repo.latestBundle(job.briefing_id, limit);
       if (!input && job.kind === "initial") return bundle;
       if (!input) throw new ProviderError("DATA_PROVIDER_NOT_CONFIGURED");
@@ -105,7 +111,8 @@ export async function runtime() {
         throw new ProviderError("FUTURE_DATA");
       if (
         job.kind === "correction" &&
-        (parsed.cutoffAt !== job.payload.content?.bundle.cutoffAt ||
+        (Date.parse(parsed.cutoffAt) !==
+          Date.parse(job.payload.content!.bundle.cutoffAt) ||
           !parsed.sources.some((s) => s.url === job.payload.evidenceUrl))
       )
         throw new ProviderError("CORRECTION_EVIDENCE_REQUIRED");

@@ -272,7 +272,6 @@ export function SampleTools() {
         body: JSON.stringify({
           action,
           date: form?.get("date"),
-          session: form?.get("session"),
         }),
       });
       const data = await r.json();
@@ -308,14 +307,7 @@ export function SampleTools() {
             disabled={busy}
           />
         </label>
-        <label>
-          세션
-          <select name="session" disabled={busy}>
-            <option value="pre">장전</option>
-            <option value="post">장후</option>
-          </select>
-        </label>
-        <button disabled={busy}>테스트 회차 등록</button>
+        <button disabled={busy}>장후 테스트 회차 등록</button>
       </form>
       <div className="button-row">
         <button disabled={busy} onClick={() => void run("step")}>

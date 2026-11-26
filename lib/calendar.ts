@@ -49,11 +49,8 @@ export function upcoming(now: Date, count = 1) {
     const date = start.plus({ days: d }).toISODate()!;
     if (tradingDay(date) === null) break;
     if (!tradingDay(date)) continue;
-    for (const s of ["pre", "post"] as const) {
-      const slot = schedule(date, s);
-      if (new Date(slot.targetAt) > now && result.length < count)
-        result.push(slot);
-    }
+    const slot = schedule(date, "post");
+    if (Date.parse(slot.targetAt) > now.getTime()) result.push(slot);
   }
   return result;
 }
@@ -68,14 +65,10 @@ export function dueSlots(now: Date, since: Date) {
   for (let i = 0; i < 32 && day <= end; i++, day = day.plus({ days: 1 })) {
     const date = day.toISODate()!;
     if (!tradingDay(date)) continue;
-    for (const session of ["pre", "post"] as const) {
-      const slot = schedule(date, session);
-      if (
-        new Date(slot.targetAt).getTime() >= since.getTime() &&
-        new Date(slot.targetAt).getTime() <= now.getTime() + 30 * 60000
-      )
-        result.push(slot);
-    }
+    const slot = schedule(date, "post");
+    const target = Date.parse(slot.targetAt);
+    if (target >= since.getTime() && target <= end.toMillis())
+      result.push(slot);
   }
   return result;
 }
@@ -86,15 +79,52 @@ export function latestDueSlot(now: Date) {
   for (let i = 0; i < 32; i++, day = day.minus({ days: 1 })) {
     const date = day.toISODate()!;
     if (!tradingDay(date)) continue;
-    for (const session of ["post", "pre"] as const) {
-      const slot = schedule(date, session);
-      if (Date.parse(slot.targetAt) <= now.getTime()) return slot;
-    }
+    const slot = schedule(date, "post");
+    if (Date.parse(slot.targetAt) <= now.getTime()) return slot;
   }
+}
+export function nextTradingClose(date: string) {
+  const start = DateTime.fromISO(date, { zone: "America/New_York" });
+  if (!start.isValid) return;
+  for (let d = 1; d < 16; d++) {
+    const next = start.plus({ days: d }).toISODate()!;
+    const trading = tradingDay(next);
+    if (trading === null) return;
+    if (trading) return schedule(next, "post").closeAt;
+  }
+}
+export type MarketSession = Session | "regular";
+export function marketSessionLabel(session: MarketSession) {
+  return session === "regular" ? "정규장" : sessionLabel(session);
+}
+export function marketSessionBounds(date: string, session: MarketSession) {
+  if (tradingDay(date) !== true) return;
+  const day = DateTime.fromISO(date, { zone: "America/New_York" });
+  const open = day.set({ hour: 9, minute: 30 }).toMillis();
+  const close = Date.parse(schedule(date, "post").closeAt);
+  const midnight = day.toMillis();
+  const nextMidnight = day.plus({ days: 1 }).toMillis();
+  const bounds = {
+    pre: { start: midnight, end: open },
+    regular: { start: open, end: close },
+    post: { start: close, end: nextMidnight },
+  };
+  return bounds[session];
+}
+export function et(iso: string) {
+  return DateTime.fromISO(iso)
+    .setZone("America/New_York")
+    .setLocale("ko")
+    .toFormat("M월 d일 (ccc) HH:mm");
 }
 export function kst(iso: string) {
   return DateTime.fromISO(iso)
     .setZone("Asia/Seoul")
     .setLocale("ko")
     .toFormat("M월 d일 (ccc) HH:mm");
+}
+export function kstDate(timestamp: number) {
+  return DateTime.fromMillis(timestamp, { zone: "Asia/Seoul" })
+    .setLocale("ko")
+    .toFormat("M월 d일 (ccc)");
 }

@@ -5,7 +5,7 @@ import { z } from "zod";
 export type AdminJob = {
   id: string;
   kind: "initial" | "correction";
-  state: JobState;
+  state: JobState | "stopped";
   attempt: number;
   errorCode: string | null;
   createdAt: string;
@@ -42,7 +42,7 @@ export type AdminNotice = {
   status: string;
   attempts: number;
 };
-export const stateLabels: Record<JobState, string> = {
+export const stateLabels: Record<AdminJob["state"], string> = {
   queued: "처리 대기",
   collecting: "자료 확인 중",
   submitting: "생성 요청 중",
@@ -53,19 +53,25 @@ export const stateLabels: Record<JobState, string> = {
   retry_wait: "자동 재시도 대기",
   failed: "확인 필요",
   published: "처리 완료",
+  stopped: "장전 발행 종료",
 };
 export function adminActions(
-  edition: Pick<AdminEdition, "version" | "missedAt"> & {
+  edition: Pick<AdminEdition, "version" | "missedAt" | "session"> & {
     job: Pick<AdminJob, "kind" | "state" | "errorCode" | "baseVersion"> | null;
   },
 ) {
   const j = edition.job;
-  const active = !!j && !["failed", "published"].includes(j.state);
+  const active = !!j && !["failed", "published", "stopped"].includes(j.state);
   const unknown = j?.errorCode === "SUBMISSION_UNKNOWN";
   const stale = j?.kind === "correction" && j.baseVersion !== edition.version;
   return {
     retry:
-      !edition.missedAt && !!j && j.state === "failed" && !unknown && !stale,
+      !edition.missedAt &&
+      !!j &&
+      j.state === "failed" &&
+      !(edition.session === "pre" && j.kind === "initial") &&
+      !unknown &&
+      !stale,
     correct: !!edition.version && !active && !unknown,
     visibility: !!edition.version || !!edition.missedAt,
   };
@@ -73,6 +79,7 @@ export function adminActions(
 export const adminErrors: Record<string, string> = {
   EDITION_SUPERSEDED: "다음 정규 회차가 도래해 미발행 안내로 마감했습니다.",
   EDITION_EVIDENCE_UNAVAILABLE: "발행 예정 시각까지의 근거 자료가 없습니다.",
+  PRE_PUBLICATION_ENDED: "장전 브리핑의 신규 발행과 재시도는 종료했습니다.",
   COMMAND_REPLAY: "이미 처리한 요청입니다. 새로고침해 현재 상태를 확인하세요.",
   BRIEFING_NOT_FOUND: "회차를 찾을 수 없습니다.",
   VERSION_CONFLICT: "보고서 버전이 바뀌었습니다. 새로고침 후 다시 확인하세요.",

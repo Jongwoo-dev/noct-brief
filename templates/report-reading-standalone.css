@@ -1,0 +1,61 @@
+@font-face {
+  font-family: "Pretendard Variable";
+  src: url("data:font/woff2;base64,__PRETENDARD_WOFF2__") format("woff2");
+  font-weight: 45 920;
+}
+
+body {
+  margin: 0;
+  color-scheme: dark;
+  background: #0d0d10;
+}
+
+.report-reading {
+  max-width: 1152px;
+  margin: auto;
+  padding: 0 42px 42px;
+}
+
+.report-masthead,
+.mast {
+  display: flex;
+  align-items: center;
+}
+
+.report-masthead {
+  justify-content: space-between;
+  gap: 14px;
+  padding: 21px 0;
+  border-bottom: 1px solid var(--report-line);
+  color: var(--report-muted);
+  font-size: 13px;
+}
+
+.mast {
+  gap: 9px;
+  color: var(--report-ink);
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.8px;
+}
+
+.mast img {
+  width: 30px;
+  height: 30px;
+}
+
+@media (max-width: 780px) {
+  .report-reading {
+    padding: 0 20px 26px;
+  }
+}
+
+@media (max-width: 400px) {
+  .report-reading {
+    padding-inline: 15px;
+  }
+
+  .report-masthead {
+    padding: 15px 0;
+  }
+}

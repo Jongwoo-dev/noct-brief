@@ -1,0 +1,164 @@
+/* Shared chart behavior in public reports and stored admin versions. */
+.chart {
+  margin: 30px 0;
+  background: var(--panel);
+  padding: 24px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  & figcaption {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: baseline;
+    margin-bottom: 20px;
+  }
+  & figcaption :is(strong, h3) {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--heading);
+    margin: 0;
+    line-height: inherit;
+  }
+  & figcaption span {
+    font-size: 13px;
+    color: var(--muted);
+  }
+  & .line-chart {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: 12px 10px;
+    padding-top: 8px;
+    font-size: 13px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  & .chart-y-axis {
+    position: relative;
+  }
+  & .chart-y-axis span {
+    position: absolute;
+    right: 0;
+    transform: translateY(-50%);
+    white-space: nowrap;
+  }
+  & .chart-x-axis {
+    grid-column: 2;
+    display: grid;
+    text-align: center;
+  }
+  & .chart-plot {
+    position: relative;
+    height: 180px;
+  }
+  & .chart-plot svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+  & .chart-dot {
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    background: var(--data);
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+  }
+  & .chart-note {
+    font-size: 14px;
+    color: var(--muted);
+    margin: 20px 0 8px;
+  }
+  & .chart-cutoff {
+    font-size: 13px;
+    color: var(--muted);
+    margin: 0;
+  }
+  & details {
+    font-size: 14px;
+    margin-top: 15px;
+  }
+  & summary {
+    cursor: pointer;
+    color: var(--action);
+    padding: 8px 0;
+    text-decoration: underline;
+    text-underline-offset: 4px;
+  }
+  & table {
+    min-width: 360px;
+  }
+  & .bar-chart {
+    position: relative;
+    display: grid;
+    grid-template-columns: 65px minmax(0, 1fr) 55px;
+    column-gap: 12px;
+    row-gap: 16px;
+    align-items: center;
+    font-size: 14px;
+  }
+  & .bar-chart::before {
+    content: "";
+    position: absolute;
+    grid-column: 2 / 3;
+    left: 50%;
+    top: 28px;
+    bottom: 0;
+    width: 1px;
+    background: var(--control);
+  }
+  & .bar-axis {
+    grid-column: 2;
+    text-align: center;
+    font-size: 13px;
+    line-height: 1;
+    color: var(--muted);
+  }
+  & .bar-row {
+    display: contents;
+  }
+  & .bar-row > span {
+    grid-column: 1;
+  }
+  & .bar-track {
+    position: relative;
+    height: 8px;
+    background: #2d2d33;
+  }
+  & .bar {
+    position: absolute;
+    height: 8px;
+  }
+  & .bar.positive {
+    left: 50%;
+    border-radius: 0 3px 3px 0;
+    background: var(--up);
+  }
+  & .bar.negative {
+    right: 50%;
+    border-radius: 3px 0 0 3px;
+    background: var(--down);
+  }
+  & .bar-row strong {
+    width: 55px;
+    text-align: right;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+  @media (max-width: 720px) {
+    & {
+      padding: 18px;
+      margin: 28px 0;
+    }
+    & figcaption {
+      display: block;
+    }
+    & figcaption span {
+      display: block;
+      margin-top: 3px;
+    }
+    & .chart-note {
+      font-size: 14px;
+    }
+  }
+}

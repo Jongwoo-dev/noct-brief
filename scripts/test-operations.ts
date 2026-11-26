@@ -8,7 +8,7 @@ import pg from "pg";
 import type { Config } from "../lib/config";
 import { dueSlots, schedule } from "../lib/calendar";
 import { assertDatabase } from "../lib/db";
-import { adminOverview } from "../lib/admin-queries";
+import { adminDetail, adminOverview } from "../lib/admin-queries";
 import { checkBackupAge, drainNotifications } from "../lib/notifications";
 import { Repository, type Job } from "../lib/repository";
 import { backupDatabase } from "./ops/backup";
@@ -27,15 +27,53 @@ async function recoveryPolicy(db: pg.Pool, check: Check) {
   };
   const before = new Date("2026-12-01T00:15:00Z"); // Monday 19:15 ET, post is preparing.
   const slots = dueSlots(before, new Date("2026-11-25T10:00:00Z"));
-  const older = "2026-11-27-post",
-    current = "2026-11-30-pre",
+  const older = "2026-11-25-post",
+    current = "2026-11-27-post",
     next = "2026-11-30-post";
-  await repo.enqueue("2026-11-27", "post", config, before);
+  const pre = schedule("2026-11-30", "pre");
+  const absentPre = schedule("2026-11-27", "pre");
+  const bundledPre = schedule("2026-11-25", "pre");
+  const progress = (await adminOverview(db, "progress", "", 1)).counts.progress;
+  for (const slot of [pre, bundledPre]) {
+    await db.query(
+      "INSERT INTO briefings(id,us_trading_date,session,target_at) VALUES($1,$2,$3,$4)",
+      [slot.id, slot.date, slot.session, slot.targetAt],
+    );
+  }
+  await db.query(
+    `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,payload,created_at)
+     VALUES(gen_random_uuid(),$1,'initial',$1,'generating',$2,$3,'{"responseId":"resp_preserved"}',$2)`,
+    [pre.id, pre.targetAt, config],
+  );
+  const overview = await adminOverview(db, "progress", pre.date, 1);
+  assert.equal(overview.total, 0);
+  assert.equal(overview.counts.progress, progress);
+  assert.equal((await adminDetail(db, pre.id))?.edition.job?.state, "stopped");
+  assert.equal((await adminDetail(db, pre.id))?.jobs[0].state, "stopped");
+  await assert.rejects(
+    () => repo.ensureSlot(absentPre.date, "pre"),
+    /PRE_PUBLICATION_ENDED/,
+  );
+  await assert.rejects(
+    () => repo.enqueue(absentPre.date, "pre", config, before),
+    /PRE_PUBLICATION_ENDED/,
+  );
+  await assert.rejects(
+    () => repo.enqueue(pre.date, "pre", config, before),
+    /PRE_PUBLICATION_ENDED/,
+  );
+  assert.equal(await repo.publicDetail(pre.id), null);
+  assert.ok(!(await repo.delays(before)).some((row) => row.id === pre.id));
+  assert.notEqual(
+    (await repo.claim("legacy-test", before))?.briefing_id,
+    pre.id,
+  );
+  await repo.enqueue("2026-11-25", "post", config, before);
   await db.query("UPDATE jobs SET state='submitting' WHERE briefing_id=$1", [
     older,
   ]);
   await Promise.all([
-    repo.reconcileSchedule(slots, config, before),
+    repo.reconcileSchedule([...slots, absentPre], config, before),
     repo.reconcileSchedule(slots, config, before),
   ]);
   const states = async () =>
@@ -47,6 +85,55 @@ async function recoveryPolicy(db: pg.Pool, check: Check) {
     ).rows;
   const rows = await states();
   assert.equal(
+    (await db.query("SELECT id FROM briefings WHERE id=$1", [absentPre.id]))
+      .rowCount,
+    0,
+  );
+  assert.equal(
+    (
+      await db.query("SELECT id FROM jobs WHERE briefing_id=$1", [
+        bundledPre.id,
+      ])
+    ).rowCount,
+    0,
+  );
+  assert.deepEqual(
+    (
+      await db.query(
+        "SELECT state,payload->>'responseId' AS response FROM jobs WHERE briefing_id=$1",
+        [pre.id],
+      )
+    ).rows[0],
+    { state: "generating", response: "resp_preserved" },
+  );
+  await db.query("UPDATE jobs SET state='submitting' WHERE briefing_id=$1", [
+    pre.id,
+  ]);
+  const attention = await adminOverview(db, "attention", pre.date, 1);
+  assert.equal(attention.editions[0].job?.state, "failed");
+  assert.equal(attention.editions[0].job?.errorCode, "SUBMISSION_UNKNOWN");
+  await db.query(
+    "UPDATE jobs SET state='failed',error_code='HTTP_429' WHERE briefing_id=$1",
+    [pre.id],
+  );
+  await assert.rejects(
+    repo.adminCommand(
+      {
+        id: crypto.randomUUID(),
+        action: "retry",
+        briefingId: pre.id,
+        baseVersion: "",
+      },
+      config,
+      before,
+    ),
+    /PRE_PUBLICATION_ENDED/,
+  );
+  assert.equal(await repo.missedDetail(pre.id), null);
+  check(
+    "장전 신규 반입·등록·예약·재시도·작업 실행 차단 및 기존 접수 기록 보존",
+  );
+  assert.equal(
     rows.find((r) => r.id === older).error_code,
     "SUBMISSION_UNKNOWN",
   );
@@ -56,7 +143,7 @@ async function recoveryPolicy(db: pg.Pool, check: Check) {
       rows.some((r) => r.id === id && !r.missed_at && r.state === "queued"),
     ),
   );
-  const originalTime = schedule("2026-11-30", "pre").targetAt;
+  const originalTime = schedule("2026-11-27", "post").targetAt;
   for (const cutoffAt of [originalTime, before.toISOString()]) {
     await db.query(
       "INSERT INTO collection_bundles(briefing_id,revision,collected_at,bundle) VALUES($1,gen_random_uuid(),$2,$3)",
@@ -72,11 +159,11 @@ async function recoveryPolicy(db: pg.Pool, check: Check) {
   assert.equal(
     (
       await repo.publicArchive({
-        date: "2026-11-27",
+        date: "2026-11-25",
         dateWindow: { limit: 6, offset: 0 },
       })
     ).length,
-    2,
+    1,
   );
   assert.ok(!(await repo.delays(before)).some((r) => r.id === older));
   assert.equal(

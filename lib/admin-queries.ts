@@ -7,12 +7,20 @@ import type {
   AdminNotice,
 } from "./admin";
 
+const retiredInitial =
+  "b.session='pre' AND j.kind='initial' AND j.state NOT IN ('failed','published')";
+const submissionUnknown =
+  "(j.state='submitting' OR j.error_code='SUBMISSION_UNKNOWN')";
+const jobColumns = `j.id AS job_id,j.kind,
+  CASE WHEN ${retiredInitial} THEN CASE WHEN ${submissionUnknown} THEN 'failed' ELSE 'stopped' END ELSE j.state END AS state,
+  j.attempt,
+  CASE WHEN ${retiredInitial} THEN CASE WHEN ${submissionUnknown} THEN 'SUBMISSION_UNKNOWN' ELSE 'PRE_PUBLICATION_ENDED' END ELSE j.error_code END AS error_code,
+  j.created_at,j.next_at,j.payload->>'baseVersion' AS base_version,j.payload->'bundle'->>'cutoffAt' AS cutoff_at,
+  j.payload->'bundle'->'missing' AS missing,j.config->>'model' AS model,j.payload->'usage' AS usage`;
 const editionQuery = `SELECT b.id,b.us_trading_date::text AS date,b.session,b.target_at,b.published_at,b.missed_at,b.visible,
   b.current_version_id AS version,v.content->'draft'->>'title' AS title,
   (SELECT count(*)::int FROM briefing_versions WHERE briefing_id=b.id) AS version_count,
-  j.id AS job_id,j.kind,j.state,j.attempt,j.error_code,j.created_at,j.next_at,
-  j.payload->>'baseVersion' AS base_version,j.payload->'bundle'->>'cutoffAt' AS cutoff_at,
-  j.payload->'bundle'->'missing' AS missing,j.config->>'model' AS model,j.payload->'usage' AS usage
+  ${jobColumns}
   FROM briefings b LEFT JOIN briefing_versions v ON v.id=b.current_version_id
   LEFT JOIN LATERAL (SELECT * FROM jobs WHERE briefing_id=b.id ORDER BY created_at DESC,id DESC LIMIT 1) j ON true`;
 type Row = Record<string, any>;
@@ -54,22 +62,23 @@ export async function adminOverview(
   date: string,
   page: number,
 ) {
-  const where = `WHERE ($1::date IS NULL OR b.us_trading_date=$1::date) AND
-    ($2='all' OR ($2='attention' AND j.state='failed') OR
-    ($2='progress' AND j.state NOT IN ('failed','published')) OR ($2='stored' AND b.current_version_id IS NOT NULL))`;
+  const editions = `(${editionQuery}) editions`;
+  const where = `WHERE ($1::date IS NULL OR date=$1::date::text) AND
+    ($2='all' OR ($2='attention' AND state='failed') OR
+    ($2='progress' AND state NOT IN ('failed','published','stopped')) OR ($2='stored' AND version IS NOT NULL))`;
   const [rows, count, summary, last, notices] = await Promise.all([
     db.query(
-      `${editionQuery} ${where} ORDER BY b.target_at DESC,b.id LIMIT 20 OFFSET $3`,
+      `SELECT * FROM ${editions} ${where} ORDER BY target_at DESC,id LIMIT 20 OFFSET $3`,
       [date || null, filter, (page - 1) * 20],
     ),
-    db.query(
-      `SELECT count(*)::int AS total FROM (${editionQuery} ${where}) result`,
-      [date || null, filter],
-    ),
+    db.query(`SELECT count(*)::int AS total FROM ${editions} ${where}`, [
+      date || null,
+      filter,
+    ]),
     db.query(`SELECT count(*)::int AS total,
       count(*) FILTER (WHERE state='failed')::int AS attention,
-      count(*) FILTER (WHERE state NOT IN ('failed','published'))::int AS progress,
-      count(*) FILTER (WHERE version IS NOT NULL)::int AS stored FROM (${editionQuery}) result`),
+      count(*) FILTER (WHERE state NOT IN ('failed','published','stopped'))::int AS progress,
+      count(*) FILTER (WHERE version IS NOT NULL)::int AS stored FROM ${editions}`),
     db.query("SELECT value FROM app_settings WHERE key='last_scheduler'"),
     db.query(
       "SELECT briefing_id,kind,status,attempts FROM notification_outbox ORDER BY next_at DESC LIMIT 20",
@@ -103,9 +112,8 @@ export async function adminDetail(db: pg.Pool, id: string, version?: string) {
       [id, version ?? b.version],
     ),
     db.query(
-      `SELECT id AS job_id,kind,state,attempt,error_code,created_at,next_at,payload->>'baseVersion' AS base_version,
-      payload->'bundle'->>'cutoffAt' AS cutoff_at,payload->'bundle'->'missing' AS missing,config->>'model' AS model,payload->'usage' AS usage
-      FROM jobs WHERE briefing_id=$1 ORDER BY created_at DESC,id DESC LIMIT 30`,
+      `SELECT ${jobColumns} FROM jobs j JOIN briefings b ON b.id=j.briefing_id
+        WHERE j.briefing_id=$1 ORDER BY j.created_at DESC,j.id DESC LIMIT 30`,
       [id],
     ),
   ]);

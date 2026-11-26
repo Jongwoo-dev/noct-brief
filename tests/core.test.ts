@@ -1,8 +1,23 @@
 import { describe, it, expect } from "vitest";
-import { schedule, tradingDay, upcoming, kst, dueSlots } from "../lib/calendar";
+import {
+  schedule,
+  tradingDay,
+  upcoming,
+  kst,
+  dueSlots,
+  latestDueSlot,
+  nextTradingClose,
+} from "../lib/calendar";
 import { readConfig } from "../lib/config";
 import { samples, sampleContent } from "../data/samples";
-import { validateContent, safeUrl } from "../lib/contract";
+import {
+  BundleSchema,
+  validateContent,
+  safeUrl,
+  upcomingEvents,
+  eventTimeLabel,
+  isUpcomingSection,
+} from "../lib/contract";
 import { sameOrigin } from "../lib/security";
 import { expiredBackups } from "../scripts/ops/backup-policy";
 describe("거래일과 시간", () => {
@@ -30,9 +45,9 @@ describe("거래일과 시간", () => {
     expect(s.closeAt).toContain("18:00");
     expect(s.targetAt).toContain("00:30");
   });
-  it("휴일 이후 다음 장전과 미정 처리", () => {
-    expect(upcoming(new Date("2026-11-26T04:00:00Z"))[0].date).toBe(
-      "2026-11-27",
+  it("휴일 이후 다음 장후와 미정 처리", () => {
+    expect(upcoming(new Date("2026-11-26T04:00:00Z"))[0].id).toBe(
+      "2026-11-27-post",
     );
     expect(upcoming(new Date("2028-01-01T12:00:00Z"))).toHaveLength(0);
   });
@@ -41,7 +56,143 @@ describe("거래일과 시간", () => {
       new Date("2026-10-26T11:15:00Z"),
       new Date("2026-10-23T23:00:00Z"),
     );
-    expect(r.map((s) => s.id)).toEqual(["2026-10-23-post", "2026-10-26-pre"]);
+    expect(r.map((s) => s.id)).toEqual(["2026-10-23-post"]);
+    expect(latestDueSlot(new Date("2026-10-26T23:29:59Z"))?.id).toBe(
+      "2026-10-23-post",
+    );
+    expect(latestDueSlot(new Date("2026-10-26T23:30:00Z"))?.id).toBe(
+      "2026-10-26-post",
+    );
+  });
+  it("예정 범위는 휴장·주말을 지나 다음 거래일 실제 폐장까지", () => {
+    expect(nextTradingClose("2026-11-25")).toBe("2026-11-27T18:00:00.000Z");
+    expect(nextTradingClose("2026-11-27")).toBe("2026-11-30T21:00:00.000Z");
+    expect(nextTradingClose("2026-10-30")).toBe("2026-11-02T21:00:00.000Z");
+    expect(nextTradingClose("2027-12-31")).toBeUndefined();
+  });
+  it("마감 당시 확인된 미래 일정만 거래일 폐장까지 시각 순으로 안내", () => {
+    const { bundle } = sampleContent("2026-11-25", "post");
+    const event = {
+      ...bundle.events[0],
+      occurredAt: null,
+      status: "scheduled" as const,
+    };
+    bundle.events = [
+      { ...event, id: "close", scheduledAt: "2026-11-27T18:00:00Z" },
+      { ...event, id: "after-close", scheduledAt: "2026-11-27T18:00:01Z" },
+      { ...event, id: "holiday", scheduledAt: "2026-11-26T16:00:00Z" },
+      { ...event, id: "past", scheduledAt: bundle.cutoffAt },
+      {
+        ...event,
+        id: "unconfirmed",
+        status: "unconfirmed",
+        scheduledAt: "2026-11-27T16:00:00Z",
+      },
+      {
+        ...event,
+        id: "late-source",
+        firstObservedAt: "2026-11-26T01:00:00Z",
+        scheduledAt: "2026-11-27T17:00:00Z",
+      },
+    ];
+    expect(
+      upcomingEvents("2026-11-25", bundle).events.map((item) => item.id),
+    ).toEqual(["holiday", "close"]);
+  });
+  it("장전·정규장 범위만 확인한 일정은 시분 없이 표시", () => {
+    const { bundle } = sampleContent("2026-11-25", "post");
+    const event = {
+      ...bundle.events[0],
+      scheduledAt: null,
+      occurredAt: null,
+      status: "scheduled" as const,
+    };
+    const pre = {
+      ...event,
+      id: "next-pre",
+      scheduledWindow: { date: "2026-11-27", session: "pre" as const },
+    };
+    const regular = {
+      ...event,
+      id: "next-regular",
+      scheduledWindow: { date: "2026-11-27", session: "regular" as const },
+    };
+    const overlapping = {
+      ...event,
+      id: "overlapping",
+      scheduledWindow: { date: "2026-11-25", session: "post" as const },
+    };
+    const outside = {
+      ...event,
+      id: "outside",
+      scheduledWindow: { date: "2026-11-27", session: "post" as const },
+    };
+    const unknown = {
+      ...event,
+      id: "unknown",
+      scheduledWindow: { date: "2028-01-03", session: "pre" as const },
+    };
+    const parsed = BundleSchema.parse({
+      ...bundle,
+      events: [outside, regular, pre],
+    });
+    expect(upcomingEvents("2026-11-25", parsed)).toEqual({
+      calendarKnown: true,
+      uncertain: false,
+      events: [pre, regular],
+    });
+    for (const item of [overlapping, unknown]) {
+      expect(
+        upcomingEvents("2026-11-25", { ...parsed, events: [item] }),
+      ).toEqual({
+        calendarKnown: true,
+        uncertain: true,
+        events: [],
+      });
+    }
+    expect(upcomingEvents("2027-12-31", parsed)).toMatchObject({
+      calendarKnown: false,
+      events: [],
+    });
+    expect(eventTimeLabel(pre)).toBe(
+      "11월 27일 (금) KST (원문 미국 동부 2026-11-27 장전)",
+    );
+    expect(eventTimeLabel(regular)).toBe(
+      "11월 27일 (금)~11월 28일 (토) KST (원문 미국 동부 2026-11-27 정규장)",
+    );
+    expect(eventTimeLabel(bundle.events[0])).toMatch(
+      /21:30 KST \(2026-11-25 12:30 UTC\)/,
+    );
+    expect(BundleSchema.parse(bundle).events).toEqual(bundle.events);
+    for (const bad of [
+      event,
+      { ...pre, scheduledAt: bundle.events[0].scheduledAt },
+    ]) {
+      expect(BundleSchema.safeParse({ ...bundle, events: [bad] }).success).toBe(
+        false,
+      );
+    }
+  });
+  it("예정 일정만 근거로 쓰는 구역을 본문의 혼합 해석과 구분", () => {
+    const { draft } = sampleContent("2026-11-25", "post");
+    const section = {
+      ...draft.sections[0],
+      type: "events" as const,
+      chartIds: [],
+      claims: [{ ...draft.sections[0].claims[0], eventIds: ["next-pre"] }],
+    };
+    const ids = new Set(["next-pre"]);
+    expect(isUpcomingSection(section, ids)).toBe(true);
+    expect(isUpcomingSection(section, new Set())).toBe(false);
+    expect(
+      isUpcomingSection(
+        {
+          ...section,
+          claims: [...section.claims, draft.sections[0].claims[1]],
+        },
+        ids,
+      ),
+    ).toBe(false);
   });
 });
 describe("콘텐츠 경계", () => {
@@ -63,6 +214,88 @@ describe("콘텐츠 경계", () => {
     c.bundle.events[0].status = "released";
     c.bundle.events[0].occurredAt = "2026-10-26T20:00:00Z";
     expect(() => validateContent(c, "sample")).toThrow("사건");
+  });
+  it("연도와 함께 인용한 영문 월 이름은 같은 한국어 달에만 대응한다", () => {
+    const c = structuredClone(samples[0].content);
+    const source = c.bundle.sources[0];
+    source.excerpt = "October 2026: unchanged in 46 states.";
+    const claim = {
+      ...c.draft.summary[0],
+      sourceIds: [source.id],
+      observationIds: [],
+      eventIds: [],
+      limitation: "",
+      kind: "fact" as const,
+      text: "10월에 46개 주에서 변화가 없었다.",
+    };
+    c.draft = { title: "지역 고용", summary: [claim], sections: [] };
+    expect(() => validateContent(c, "sample")).not.toThrow();
+    for (const text of [
+      "11월에 변화가 없었다.",
+      "10월에 10% 증가했다.",
+      "110월 조사",
+    ]) {
+      claim.text = text;
+      expect(() => validateContent(c, "sample")).toThrow("수치");
+    }
+  });
+  it("시각은 직접 인용한 출처의 같은 시간대와 시·분 쌍에만 대응한다", () => {
+    const c = structuredClone(samples[0].content);
+    const [cited] = c.bundle.sources;
+    cited.excerpt =
+      "14:29 ET 장중 3.6% 하락. 17:36 ET 보도, 18:02 ET 관측. " +
+      "2개 기록의 18번과 36번 항목. 미 동부시간 09:45, 한국시간 23:45 발표 예정. " +
+      "10:21 UTC 기록과 11:22 UTC+9 기록.";
+    c.bundle.sources.push({
+      ...cited,
+      id: "uncited-clock",
+      excerpt: "19:05 ET 관측.",
+    });
+    const text =
+      "미 동부시간 오후 2시 29분 장중 3.6% 하락했고, 오후5시36분에 보도됐다. " +
+      "미 동부시간 오전 9시 45분, 한국시간 오후 11시 45분 발표를 지켜볼 일이다. " +
+      "UTC+9 11:22 기록도 있다.";
+    const limitation =
+      "시간외 자료는 18시 2분과 오후 6시 2분 관측값에 한정된다.";
+    const claim = {
+      ...c.draft.summary[0],
+      sourceIds: [cited.id],
+      observationIds: [],
+      eventIds: [],
+      kind: "ai_inference" as const,
+      text,
+      limitation,
+    };
+    c.draft = { title: "관측 시각", summary: [claim], sections: [] };
+    expect(validateContent(c, "sample").draft.summary[0]).toEqual(claim);
+
+    for (const unsupported of [
+      "오후 7시 5분", // Only in the uncited source.
+      "18:36 ET", // Both numbers are also present separately in the cited excerpt.
+      "오후 6시 36분",
+      "18시 36분",
+      "오전 2시 29분",
+      "한국시간 18:02",
+      "한국시간 오후 6시 2분",
+      "한국시간으로 오후 2시 29분",
+      "오후 2시 29분(한국시간)",
+      "오후 2시 29분(미국 서부시간)",
+      "UTC 18:02",
+      "14:29 (UTC)",
+      "14:29 CET",
+      "UTC+9 14:29",
+      "14:29 (UTC+09:00)",
+      "14:29 GMT+9",
+      "UTC+9 10:21",
+      "11:22 UTC",
+      "17% 상승",
+      "6% 상승",
+    ]) {
+      claim.limitation = unsupported;
+      expect(() => validateContent(c, "sample"), unsupported).toThrow(
+        "입력 근거에 없는 수치",
+      );
+    }
   });
   it("차트 단위 충돌 거부", () => {
     const c = structuredClone(samples[0].content);

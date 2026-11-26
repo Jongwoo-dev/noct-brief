@@ -1,15 +1,33 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { detail, neighbors } from "@/lib/queries";
-import { kst, earlyClose, sessionLabel } from "@/lib/calendar";
+import {
+  earlyClose,
+  schedule as marketSchedule,
+  sessionLabel,
+} from "@/lib/calendar";
+import {
+  formatKoreaTime,
+  formatMarketTime,
+  formatSourcePublication,
+  formatSourceTime,
+} from "@/lib/report-time";
 import { Chart } from "@/components/chart";
+import "@/templates/report-reading.css";
+import "../report-page.css";
 import { UiIcon } from "@/components/ui-icon";
 import {
   CitationProvider,
   SourceReturnLink,
 } from "@/components/citation-navigation";
 import { SourceReferences } from "@/components/source-references";
-import type { Content } from "@/lib/contract";
+import {
+  eventTimeLabel,
+  isUpcomingSection,
+  upcomingEvents,
+  type Content,
+  type Draft,
+} from "@/lib/contract";
 export const dynamic = "force-dynamic";
 const kindLabel = {
   fact: "확인한 사실",
@@ -21,14 +39,20 @@ function Claim({
   content,
   number,
   referenceId,
+  upcoming = false,
 }: {
   claim: Content["draft"]["summary"][number];
   content: Content;
   number?: number;
   referenceId: string;
+  upcoming?: boolean;
 }) {
+  const [eventHeading, ...eventLines] = claim.text.split("\n");
+  const separator = upcoming ? eventHeading.indexOf(" | ") : -1;
+  const event = separator > 0 && separator + 3 < eventHeading.length;
+  const Wrapper = upcoming ? "li" : "div";
   return (
-    <div className="claim">
+    <Wrapper className="claim">
       <div className="claim-heading">
         {number && (
           <span className="summary-number">
@@ -39,16 +63,75 @@ function Claim({
           {kindLabel[claim.kind]}
         </span>
       </div>
-      <p>
-        {claim.text}
+      {event && (
+        <>
+          <p className="schedule-time">{eventHeading.slice(0, separator)}</p>
+          <h3>{eventHeading.slice(separator + 3)}</h3>
+        </>
+      )}
+      <p className={upcoming ? "schedule-copy" : undefined}>
+        {event ? eventLines.join("\n") : claim.text}
         <SourceReferences
           sourceIds={claim.sourceIds}
           content={content}
           referenceId={referenceId}
         />
       </p>
-      {claim.limitation && <p className="limitation">{claim.limitation}</p>}
-    </div>
+      {claim.limitation && <p className="note">{claim.limitation}</p>}
+    </Wrapper>
+  );
+}
+function DraftSection({
+  section,
+  index,
+  content,
+  upcoming = false,
+}: {
+  section: Draft["sections"][number];
+  index: number;
+  content: Content;
+  upcoming?: boolean;
+}) {
+  const Heading = upcoming || content.session === "post" ? "h3" : "h2";
+  const Claims = upcoming ? "ul" : "div";
+  return (
+    <section id={section.id} className="section">
+      <div className="section-number">
+        {String(index + 1).padStart(2, "0")} ·{" "}
+        {
+          {
+            market: "시장 현황",
+            events: "주요 사건",
+            earnings: "실적·어닝콜",
+            outlook: "다음 확인점",
+            trend: "흐름 점검",
+          }[section.type]
+        }
+      </div>
+      <Heading className="market-topic">{section.title}</Heading>
+      <Claims
+        className={upcoming ? "schedule" : undefined}
+        role={upcoming ? "list" : undefined}
+      >
+        {section.claims.map((claim, i) => (
+          <Claim
+            key={claim.id}
+            claim={claim}
+            content={content}
+            referenceId={`section-${section.id}-${i}`}
+            upcoming={upcoming}
+          />
+        ))}
+      </Claims>
+      {section.chartIds.map((id) => (
+        <Chart
+          key={id}
+          chart={content.charts.find((g) => g.id === id)!}
+          content={content}
+          referenceId={`chart-${section.id}-${id}`}
+        />
+      ))}
+    </section>
   );
 }
 export async function generateMetadata({
@@ -79,19 +162,19 @@ export default async function Briefing({
   if (!b) notFound();
   if (!("content" in b))
     return (
-      <main id="main" className="detail-page">
+      <main id="main" className="report-reading report-web">
         <Link className="back" href="/#archive">
           <UiIcon name="back" /> 지난 브리핑
         </Link>
-        <header className="article-header">
+        <header className="article-header reading-copy">
           <div className="eyebrow">
             <span className="session-label">
               <UiIcon name={b.session} />
               {sessionLabel(b.session)} 브리핑
             </span>{" "}
-            미국 {b.date}
+            미국 거래일 {b.date}
           </div>
-          <h1>브리핑 미발행 안내</h1>
+          <h1 className="report-title">브리핑 미발행 안내</h1>
           <p>
             다음 정규 회차의 발행 시각까지 이 브리핑을 발행하지 못해 해당 회차를
             마감했습니다.
@@ -100,7 +183,9 @@ export default async function Briefing({
             <div>
               <dt>발행 예정 시각</dt>
               <dd>
-                <time dateTime={b.targetAt}>{kst(b.targetAt)} KST</time>
+                <time dateTime={b.targetAt}>
+                  {formatMarketTime(b.targetAt)}
+                </time>
               </dd>
             </div>
           </dl>
@@ -108,53 +193,74 @@ export default async function Briefing({
       </main>
     );
   const c = b.content;
+  const post = c.session === "post";
+  const schedule = post ? upcomingEvents(c.date, c.bundle) : null;
+  const scheduledIds = new Set(schedule?.events.map((event) => event.id));
+  const upcomingSections = c.draft.sections.filter((s) =>
+    isUpcomingSection(s, scheduledIds),
+  );
+  const resultsSections = c.draft.sections.filter(
+    (s) => !upcomingSections.includes(s),
+  );
+  const events = post
+    ? c.bundle.events.filter((event) => event.status !== "scheduled")
+    : c.bundle.events;
+  const eventResultsTitle = post ? "확인한 사건과 결과" : "예정과 결과";
   const { older, newer } = await neighbors(id, b.targetAt);
+  const sectionLink = (s: Draft["sections"][number], i: number) => (
+    <a key={s.id} href={`#${s.id}`}>
+      <span>{String(i + 1).padStart(2, "0")}</span>
+      {s.title}
+    </a>
+  );
   const contents = (
     <nav aria-label="이 글의 목차">
       <a href="#summary">핵심 요약</a>
-      {c.draft.sections.map((s, i) => (
-        <a key={s.id} href={`#${s.id}`}>
-          <span>{String(i + 1).padStart(2, "0")}</span>
-          {s.title}
-        </a>
-      ))}
+      {post && <a href="#market-results">장후 결과</a>}
+      {resultsSections.map(sectionLink)}
       {c.reduced &&
         !c.draft.sections.length &&
         c.bundle.observations.length > 0 && (
           <a href="#observations">확인한 수치</a>
         )}
-      {c.bundle.events.length > 0 && <a href="#event-results">예정과 결과</a>}
+      {events.length > 0 && <a href="#event-results">{eventResultsTitle}</a>}
+      {post && <a href="#upcoming-events">예정 이벤트</a>}
+      {upcomingSections.map((s, i) =>
+        sectionLink(s, resultsSections.length + i),
+      )}
       <a href="#sources">출처와 확인 범위</a>
       {b.corrections.length > 0 && <a href="#corrections">정정 이력</a>}
     </nav>
   );
   return (
-    <main id="main" className="detail-page">
+    <main id="main" className="report-reading report-web">
       <Link className="back" href="/">
         <UiIcon name="back" /> 브리핑 목록
       </Link>
-      <header className="article-header">
+      <header className="article-header reading-copy">
         <div className="eyebrow">
           <span className="session-label">
             <UiIcon name={c.session} />
             {sessionLabel(c.session)} 브리핑
           </span>{" "}
-          <span>미국 {c.date}</span>
+          <span>미국 거래일 {c.date}</span>
         </div>
-        <h1>{c.draft.title}</h1>
+        <h1 className="report-title">{c.draft.title}</h1>
         <dl className="article-meta">
           <div>
             <dt>자료 기준</dt>
             <dd>
               <time dateTime={c.bundle.cutoffAt}>
-                {kst(c.bundle.cutoffAt)} KST
+                {formatMarketTime(c.bundle.cutoffAt)}
               </time>
             </dd>
           </div>
           <div>
             <dt>발행</dt>
             <dd>
-              <time dateTime={b.publishedAt}>{kst(b.publishedAt)} KST</time>
+              <time dateTime={b.publishedAt}>
+                {formatKoreaTime(b.publishedAt)}
+              </time>
             </dd>
           </div>
           {b.correctedAt && (
@@ -162,15 +268,23 @@ export default async function Briefing({
               <dt>정정</dt>
               <dd>
                 <a href="#corrections">
-                  <time dateTime={b.correctedAt}>{kst(b.correctedAt)} KST</time>
+                  <time dateTime={b.correctedAt}>
+                    {formatKoreaTime(b.correctedAt)}
+                  </time>
                   <UiIcon name="forward" />
                 </a>
               </dd>
             </div>
           )}
         </dl>
+        <p className="meta">
+          시각은 한국시간(KST)을 먼저 표시합니다. 미국 거래일은 현지 날짜입니다.
+        </p>
         {earlyClose(c.date) && (
-          <p className="meta">조기 폐장일 · 정규장 종료 13:00 ET</p>
+          <p className="meta">
+            조기 폐장일 · 정규장 종료{" "}
+            {formatMarketTime(marketSchedule(c.date, c.session).closeAt)}
+          </p>
         )}
         {c.sample && (
           <aside className="sample-banner">
@@ -194,7 +308,7 @@ export default async function Briefing({
       </header>
       <CitationProvider key={id}>
         <div className="article-grid">
-          <section className="summary-block" id="summary">
+          <section className="summary-block reading-copy" id="summary">
             <h2>핵심 요약</h2>
             {!c.draft.summary.length && (
               <p>
@@ -223,12 +337,20 @@ export default async function Briefing({
               {contents}
             </details>
           </aside>
-          <article className="article-body" aria-label="브리핑 본문">
+          <article
+            className="article-body reading-copy"
+            aria-label="브리핑 본문"
+          >
+            {post && (
+              <h2 className="group-title" id="market-results">
+                장후 결과
+              </h2>
+            )}
             {c.reduced &&
               !c.draft.sections.length &&
               c.bundle.observations.length > 0 && (
-                <section className="article-section" id="observations">
-                  <h2>확인한 수치</h2>
+                <section className="section" id="observations">
+                  <h2 className="section-title">확인한 수치</h2>
                   <div className="table-scroll">
                     <table>
                       <thead>
@@ -254,7 +376,11 @@ export default async function Briefing({
                               <br />
                               {o.comparison}
                               <br />
-                              {kst(o.observedAt)} KST
+                              {formatSourceTime(
+                                o.observedAt,
+                                o.observedOriginalTime,
+                                "관측",
+                              )}
                               <br />
                               <SourceReferences
                                 sourceIds={[o.sourceId]}
@@ -269,77 +395,112 @@ export default async function Briefing({
                   </div>
                 </section>
               )}
-            {c.draft.sections.map((s, i) => (
-              <section id={s.id} className="article-section" key={s.id}>
-                <div className="section-number">
-                  {String(i + 1).padStart(2, "0")} ·{" "}
-                  {
-                    {
-                      market: "시장 현황",
-                      events: "주요 사건",
-                      earnings: "실적·어닝콜",
-                      outlook: "다음 확인점",
-                      trend: "흐름 점검",
-                    }[s.type]
-                  }
-                </div>
-                <h2>{s.title}</h2>
-                {s.claims.map((p, claimIndex) => (
-                  <Claim
-                    key={p.id}
-                    claim={p}
-                    content={c}
-                    referenceId={`section-${s.id}-${claimIndex}`}
-                  />
-                ))}
-                {s.chartIds.map((id) => (
-                  <Chart
-                    key={id}
-                    chart={c.charts.find((g) => g.id === id)!}
-                    content={c}
-                    referenceId={`chart-${s.id}-${id}`}
-                  />
-                ))}
-              </section>
+            {resultsSections.map((s, i) => (
+              <DraftSection key={s.id} section={s} index={i} content={c} />
             ))}
-            {c.bundle.events.length > 0 && (
-              <section id="event-results" className="article-section">
-                <h2>예정과 결과</h2>
-                {c.bundle.events.map((e) => (
-                  <div className="event" key={e.id}>
-                    <p className="meta">
-                      {kst(e.scheduledAt)} KST ·{" "}
-                      {
+            {events.length > 0 && (
+              <section id="event-results" className="section">
+                <h2 className="section-title">{eventResultsTitle}</h2>
+                <ul className="schedule" role="list">
+                  {events.map((e) => (
+                    <li key={e.id}>
+                      <p className="schedule-time">
+                        {e.occurredAt
+                          ? formatSourceTime(
+                              e.occurredAt,
+                              e.occurredOriginalTime,
+                              "발생",
+                            )
+                          : eventTimeLabel(e)}{" "}
+                        ·{" "}
                         {
-                          scheduled: "예정",
-                          released: "발표",
-                          postponed: "연기",
-                          unconfirmed: "미확인",
-                        }[e.status]
-                      }
+                          {
+                            scheduled: "예정",
+                            released: "발표",
+                            postponed: "연기",
+                            unconfirmed: "미확인",
+                          }[e.status]
+                        }
+                      </p>
+                      <h3>{e.title}</h3>
+                      <p>
+                        {e.result}
+                        <SourceReferences
+                          sourceIds={[e.sourceId]}
+                          content={c}
+                          referenceId={`event-${e.id}`}
+                        />
+                      </p>
+                      <p className="note">확인점 · {e.watch}</p>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+            {schedule && (
+              <section id="upcoming-events" className="section">
+                <h2 className="section-title">예정 이벤트</h2>
+                {!schedule.calendarKnown ? (
+                  <p className="meta">
+                    다음 거래일의 정규장 종료 시각을 확인하지 못했습니다.
+                  </p>
+                ) : schedule.uncertain ? (
+                  <p className="meta">
+                    일부 일정은 자료 마감 이후부터 다음 거래일 폐장까지의 범위에
+                    해당하는지 확인하지 못했습니다.
+                  </p>
+                ) : (
+                  schedule.events.length === 0 && (
+                    <p className="meta">
+                      다음 거래일 정규장 종료까지 이 브리핑에 담긴 예정 이벤트가
+                      없습니다.
                     </p>
-                    <h3>{e.title}</h3>
-                    <p>
-                      {e.result}
-                      <SourceReferences
-                        sourceIds={[e.sourceId]}
-                        content={c}
-                        referenceId={`event-${e.id}`}
-                      />
-                    </p>
-                    <p className="limitation">확인점 · {e.watch}</p>
-                  </div>
+                  )
+                )}
+                <ul className="schedule" role="list">
+                  {schedule.events.map((event) => (
+                    <li key={event.id}>
+                      <p className="schedule-time">
+                        {event.scheduledAt ? (
+                          <time dateTime={event.scheduledAt}>
+                            {eventTimeLabel(event)}
+                          </time>
+                        ) : (
+                          eventTimeLabel(event)
+                        )}
+                      </p>
+                      <h3>
+                        {event.title}
+                        <SourceReferences
+                          sourceIds={[event.sourceId]}
+                          content={c}
+                          referenceId={`event-${event.id}`}
+                        />
+                      </h3>
+                      {event.result && <p>{event.result}</p>}
+                      <p className="note">
+                        {event.watch.trim() ||
+                          "주목할 이유를 확인하지 못했습니다."}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+                {upcomingSections.map((s, i) => (
+                  <DraftSection
+                    key={s.id}
+                    section={s}
+                    index={resultsSections.length + i}
+                    content={c}
+                    upcoming
+                  />
                 ))}
               </section>
             )}
-            <section
-              id="sources"
-              className="article-section article-appendix sources"
-            >
+            <section id="sources" className="section article-appendix sources">
               <h2>출처와 확인 범위</h2>
               <p className="meta">
-                조사 범위 {kst(c.bundle.coverageStart)} ~{" "}
-                {kst(c.bundle.cutoffAt)} KST
+                조사 범위 {formatMarketTime(c.bundle.coverageStart)} ~{" "}
+                {formatMarketTime(c.bundle.cutoffAt)}
               </p>
               <ol>
                 {c.bundle.sources.map((s) => (
@@ -352,9 +513,13 @@ export default async function Briefing({
                       {s.method === "sample" ? " · 가상 자료" : ""}
                     </p>
                     <p className="meta">
-                      발표 {kst(s.publishedAt)} KST
+                      게시{" "}
+                      {formatSourcePublication(
+                        s.publishedAt,
+                        s.publishedOriginalTime,
+                      )}
                       <br />
-                      확인 {kst(s.checkedAt)} KST
+                      확인 {formatKoreaTime(s.checkedAt)}
                     </p>
                     <SourceReturnLink sourceId={s.id} />
                   </li>
@@ -362,14 +527,11 @@ export default async function Briefing({
               </ol>
             </section>
             {b.corrections.length > 0 && (
-              <section
-                id="corrections"
-                className="article-section article-appendix"
-              >
+              <section id="corrections" className="section article-appendix">
                 <h2>정정 이력</h2>
                 {b.corrections.map((r, i) => (
                   <div className="correction-entry" key={i}>
-                    <p className="meta">{kst(r.at)} KST</p>
+                    <p className="meta">{formatKoreaTime(r.at)}</p>
                     <p>{r.change}</p>
                     <p>이유: {r.reason}</p>
                   </div>

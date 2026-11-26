@@ -1,5 +1,6 @@
 import type { Content } from "@/lib/contract";
-import { kst } from "@/lib/calendar";
+import "./chart.css";
+import { formatMarketTime, formatSourceTime } from "@/lib/report-time";
 import { SourceReferences } from "@/components/source-references";
 export function Chart({
   chart,
@@ -20,6 +21,14 @@ export function Chart({
     })),
   );
   const values = points.map((p) => p.observation.value);
+  const observedTimes = new Set(
+    points.map(({ observation }) =>
+      formatSourceTime(
+        observation.observedAt,
+        observation.observedOriginalTime,
+      ),
+    ),
+  );
   const barExtent = Math.max(...values.map(Math.abs), 1);
   const min = Math.min(...values) - 0.4,
     max = Math.max(...values) + 0.4;
@@ -32,13 +41,13 @@ export function Chart({
   }));
   return (
     <figure
-      className="chart"
+      className="chart report-chart"
       id={`chart-${chart.id}`}
       aria-labelledby={`${chart.id}-title`}
     >
       <figcaption>
-        <strong id={`${chart.id}-title`}>{chart.title}</strong>
-        <span>
+        <h3 id={`${chart.id}-title`}>{chart.title}</h3>
+        <span className="unit">
           {chart.period} · {chart.unit}
         </span>
       </figcaption>
@@ -156,7 +165,13 @@ export function Chart({
         {chart.alt}
       </p>
       <p className="chart-cutoff">
-        자료 기준 {kst(content.bundle.cutoffAt)} KST
+        {observedTimes.size === 1 && (
+          <>
+            관측 시각 {observedTimes.values().next().value}
+            <br />
+          </>
+        )}
+        자료 기준 {formatMarketTime(content.bundle.cutoffAt)}
         <SourceReferences
           sourceIds={chart.sourceIds}
           content={content}
@@ -177,6 +192,7 @@ export function Chart({
                 <th>대상</th>
                 <th>구간</th>
                 <th>값 ({chart.unit})</th>
+                <th>관측 시각</th>
               </tr>
             </thead>
             <tbody>
@@ -185,6 +201,12 @@ export function Chart({
                   <th>{p.series}</th>
                   <td>{p.label}</td>
                   <td>{p.observation.value}</td>
+                  <td>
+                    {formatSourceTime(
+                      p.observation.observedAt,
+                      p.observation.observedOriginalTime,
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

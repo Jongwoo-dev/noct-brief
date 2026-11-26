@@ -19,6 +19,9 @@
     "db:migrate": "tsx scripts/migrate.ts",
     "db:seed": "tsx scripts/seed.ts",
     "worker": "tsx scripts/worker.ts",
+    "report:trial": "tsx scripts/report-trial.ts",
+    "research:trial": "tsx scripts/research-trial.ts",
+    "report:render": "tsx scripts/render-report.ts",
     "check": "npm run typecheck && npm test && npm run test:integration && npm run build",
     "release:package": "tsx scripts/ops/package-release.ts",
     "format:check": "prettier --check app components lib data scripts tests instrumentation.ts next.config.ts vitest.config.ts tsconfig.json package.json"

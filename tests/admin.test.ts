@@ -3,6 +3,7 @@ import { adminActions, adminSearch } from "../lib/admin";
 describe("administrator action boundaries", () => {
   const failed = {
     version: "",
+    session: "post",
     job: {
       kind: "initial",
       state: "failed",
@@ -12,6 +13,7 @@ describe("administrator action boundaries", () => {
   } as const;
   const correction = {
     version: "stored",
+    session: "post",
     job: {
       kind: "correction",
       state: "collecting",
@@ -29,6 +31,7 @@ describe("administrator action boundaries", () => {
   });
   it("blocks a new correction as well as retry while submission is unknown", () => {
     const edition = {
+      ...failed,
       version: "stored",
       job: { ...failed.job, errorCode: "SUBMISSION_UNKNOWN" },
     };
@@ -60,6 +63,16 @@ describe("administrator action boundaries", () => {
       correct: false,
       visibility: true,
     });
+  });
+  it("keeps correction retry available for past pre-market reports", () => {
+    expect(adminActions({ ...failed, session: "pre" }).retry).toBe(false);
+    expect(
+      adminActions({
+        ...correction,
+        session: "pre",
+        job: { ...correction.job, state: "failed" },
+      }).retry,
+    ).toBe(true);
   });
   it("rejects malformed dates, inherited filter names and unsafe page offsets", () => {
     expect(

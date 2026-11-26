@@ -4,7 +4,7 @@ import { UiIcon } from "@/components/ui-icon";
 import "./globals.css";
 export const metadata: Metadata = {
   title: { default: "NOCT Brief · 녹 브리프", template: "%s · NOCT Brief" },
-  description: "미국 증시의 흐름을 읽는 장전·장후 브리핑",
+  description: "미국 증시의 장후 결과와 다음 주요 일정을 정리하는 브리핑",
 };
 export default function Layout({ children }: { children: React.ReactNode }) {
   return (

@@ -18,13 +18,30 @@ const schema = z.object({
   ADMIN_GOOGLE_SUB: z.string().default(""),
   OPENAI_API_KEY: z.string().default(""),
   OPENAI_MODEL: z.string().default(""),
+  OPENAI_VERIFICATION_MODEL: z.string().default(""),
   OPENAI_REASONING_EFFORT: z.enum(["low", "medium", "high"]).default("medium"),
   OPENAI_MAX_OUTPUT_TOKENS: z.coerce
     .number()
     .int()
     .min(1000)
     .max(24000)
-    .default(8000),
+    .default(10000),
+  OPENAI_RESEARCH_MODEL: z.string().trim().min(1).default("gpt-6.2-sol"),
+  OPENAI_RESEARCH_REASONING_EFFORT: z
+    .enum(["low", "medium", "high", "xhigh"])
+    .default("high"),
+  OPENAI_RESEARCH_MAX_OUTPUT_TOKENS: z.coerce
+    .number()
+    .int()
+    .min(1000)
+    .max(64000)
+    .default(32000),
+  OPENAI_RESEARCH_MAX_TOOL_CALLS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(80)
+    .default(40),
   TELEGRAM_BOT_TOKEN: z.string().default(""),
   TELEGRAM_CHAT_ID: z.string().default(""),
   MARKET_DATA_PROVIDER: z.string().default(""),

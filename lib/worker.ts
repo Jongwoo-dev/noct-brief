@@ -1,6 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
-import { validateContent, reducedContent, type Bundle } from "./contract";
+import {
+  assertEvidenceAsOf,
+  hasDateOnlyEvidence,
+  hasPrivateResearch,
+  validateContent,
+  reducedContent,
+  type Bundle,
+} from "./contract";
 import { Repository, type Job } from "./repository";
 import { tradingDay } from "./calendar";
 import {
@@ -13,6 +20,25 @@ const digest = (b: Bundle) =>
   createHash("sha256").update(JSON.stringify(b)).digest("hex");
 const plus = (d: Date, minutes: number) =>
   new Date(d.getTime() + minutes * 60000);
+function assertGenerationEvidence(job: Job, bundle: Bundle, now: Date) {
+  if (hasDateOnlyEvidence(bundle) || hasPrivateResearch(bundle))
+    throw new ProviderError("EDITION_EVIDENCE_UNAVAILABLE");
+  if (job.config.mode !== "live") return;
+  try {
+    assertEvidenceAsOf(
+      bundle,
+      now,
+      job.kind === "correction" ? job.payload.evidenceUrl : undefined,
+    );
+  } catch {
+    throw new ProviderError("EDITION_EVIDENCE_UNAVAILABLE");
+  }
+  if (
+    !bundle.sources.length ||
+    bundle.sources.some((s) => s.rights !== "approved" || s.method === "sample")
+  )
+    throw new ProviderError("EDITION_EVIDENCE_UNAVAILABLE");
+}
 export class Worker {
   constructor(
     private repo: Repository,
@@ -77,6 +103,7 @@ export class Worker {
           bundle,
           job.config.mode === "sample",
           now.toISOString(),
+          job.config.timePolicy,
         );
         try {
           validateContent(content, job.config.mode);
@@ -147,18 +174,7 @@ export class Worker {
         ];
         bundle.pendingCalls = [];
       }
-      if (
-        job.kind === "initial" &&
-        job.config.mode === "live" &&
-        (!bundle.sources.length ||
-          bundle.sources.some(
-            (s) =>
-              s.rights !== "approved" ||
-              s.method === "sample" ||
-              Date.parse(s.publishedAt) > Date.parse(bundle.cutoffAt),
-          ))
-      )
-        throw new ProviderError("EDITION_EVIDENCE_UNAVAILABLE");
+      assertGenerationEvidence(job, bundle, now);
       // Persist the submission boundary before sending a billable request. A crash here needs operator reconciliation.
       await this.repo.markSubmitting(job);
       const result = await this.generator.submit(job, bundle);
@@ -183,6 +199,7 @@ export class Worker {
       return;
     }
     if (job.state === "validating") {
+      assertGenerationEvidence(job, job.payload.bundle!, now);
       try {
         validateContent(job.payload.content, job.config.mode);
       } catch {
@@ -234,7 +251,7 @@ export class Worker {
       `INSERT INTO notification_outbox(id,dedupe_key,briefing_id,kind,message,next_at)
        SELECT gen_random_uuid(),b.id || ':delay',b.id,'delay','목표 시각 이후 기술적 발행 지연이 이어지고 있습니다.',$1
        FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial'
-       WHERE b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at <= $1::timestamptz - interval '15 minutes'
+       WHERE b.session='post' AND b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at <= $1::timestamptz - interval '15 minutes'
          AND (j.state IS DISTINCT FROM 'waiting_data' OR b.target_at <= $1::timestamptz - interval '1 hour')
          AND NOT EXISTS (SELECT 1 FROM notification_outbox n WHERE n.dedupe_key=b.id || ':delay')
        ON CONFLICT (dedupe_key) DO NOTHING`,

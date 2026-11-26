@@ -3,12 +3,14 @@ import type pg from "pg";
 import { transaction } from "./db";
 import {
   validateContent,
+  assertEvidenceAsOf,
   type Bundle,
   type Content,
   type PublicBriefing,
 } from "./contract";
 import { latestDueSlot, schedule, type Session } from "./calendar";
 import type { ArchiveEntry } from "./archive";
+import type { pairedTimePolicy } from "./report-time";
 export type JobState =
   | "queued"
   | "collecting"
@@ -48,6 +50,7 @@ export type Job = {
     promptVersion: string;
     reasoning: string;
     maxOutputTokens: number;
+    timePolicy?: typeof pairedTimePolicy;
   };
   target_at: Date;
   us_trading_date: string;
@@ -60,6 +63,14 @@ export class Repository {
   ) {}
   async ensureSlot(date: string, session: "pre" | "post") {
     const s = schedule(date, session);
+    if (s.session === "pre") {
+      const existing = await this.db.query(
+        "SELECT 1 FROM briefings WHERE id=$1 AND current_version_id IS NOT NULL",
+        [s.id],
+      );
+      if (!existing.rowCount) throw new Error("PRE_PUBLICATION_ENDED");
+      return s;
+    }
     await this.db.query(
       "INSERT INTO briefings(id,us_trading_date,session,target_at) VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING",
       [s.id, date, session, s.targetAt],
@@ -72,6 +83,7 @@ export class Repository {
     config: Job["config"],
     now: Date,
   ) {
+    if (session === "pre") throw new Error("PRE_PUBLICATION_ENDED");
     const s = await this.ensureSlot(date, session);
     await this.db.query(
       `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at)
@@ -91,13 +103,14 @@ export class Repository {
         `INSERT INTO briefings(id,us_trading_date,session,target_at)
         SELECT id,date,session,"targetAt" FROM jsonb_to_recordset($1::jsonb)
           AS s(id text,date date,session text,"targetAt" timestamptz)
+        WHERE s.session='post'
         ON CONFLICT DO NOTHING`,
         [JSON.stringify(slots)],
       );
       await tx.query(
         `INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at)
         SELECT gen_random_uuid(),id,'initial',id,'queued',$2,$3,$2 FROM briefings
-        WHERE (id=ANY($1::text[]) OR target_at <= $2) AND current_version_id IS NULL AND missed_at IS NULL
+        WHERE session='post' AND (id=ANY($1::text[]) OR target_at <= $2) AND current_version_id IS NULL AND missed_at IS NULL
           AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.dedupe_key=briefings.id)
         ON CONFLICT DO NOTHING`,
         [slots.map((s) => s.id), now, config],
@@ -108,7 +121,7 @@ export class Repository {
           UPDATE jobs j SET state='failed', error_code=CASE WHEN j.state='submitting' THEN 'SUBMISSION_UNKNOWN'
             ELSE coalesce(j.error_code,'EDITION_SUPERSEDED') END, owner=NULL,lease_until=NULL,fence=fence+1
           FROM briefings b WHERE b.id=j.briefing_id AND j.kind='initial' AND j.state<>'published' AND b.current_version_id IS NULL
-            AND b.missed_at IS NULL AND b.target_at < $2
+            AND b.session='post' AND b.missed_at IS NULL AND b.target_at < $2
           RETURNING j.briefing_id,j.error_code
         ) UPDATE briefings b SET missed_at=$1,visible=true FROM superseded s
           WHERE b.id=s.briefing_id AND b.current_version_id IS NULL AND b.missed_at IS NULL
@@ -139,7 +152,11 @@ export class Repository {
   }
   async claim(owner: string, now: Date): Promise<Job | undefined> {
     const r = await this.db.query(
-      `WITH candidate AS (SELECT id FROM jobs WHERE state NOT IN ('failed','published') AND next_at<=$1 AND (lease_until IS NULL OR lease_until<=$1) ORDER BY next_at,id FOR UPDATE SKIP LOCKED LIMIT 1)
+      `WITH candidate AS (
+        SELECT j.id FROM jobs j JOIN briefings b ON b.id=j.briefing_id
+        WHERE (j.kind='correction' OR b.session='post') AND j.state NOT IN ('failed','published')
+          AND j.next_at<=$1 AND (j.lease_until IS NULL OR j.lease_until<=$1)
+        ORDER BY j.next_at,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1)
       UPDATE jobs j SET owner=$2,lease_until=$1::timestamptz+interval '90 seconds',fence=fence+1 FROM candidate c,briefings b WHERE j.id=c.id AND b.id=j.briefing_id RETURNING j.*,b.target_at,b.us_trading_date::text,b.session`,
       [now, owner],
     );
@@ -200,6 +217,12 @@ export class Repository {
   }
   async publish(job: Job, content: Content, now: Date) {
     const valid = validateContent(content, this.mode);
+    if (this.mode === "live")
+      assertEvidenceAsOf(
+        valid.bundle,
+        now,
+        job.kind === "correction" ? job.payload.evidenceUrl : undefined,
+      );
     if (
       job.kind === "initial" &&
       valid.bundle.sources.some(
@@ -234,7 +257,9 @@ export class Repository {
             b.current_version_id,
           ])
         ).rows[0].content as Content;
-        if (valid.bundle.cutoffAt !== old.bundle.cutoffAt)
+        if (
+          Date.parse(valid.bundle.cutoffAt) !== Date.parse(old.bundle.cutoffAt)
+        )
           throw new Error("정정 시 자료 기준 변경 금지");
       }
       const version = randomUUID();
@@ -384,7 +409,7 @@ export class Repository {
   async delays(now: Date) {
     return (
       await this.db.query(
-        "SELECT b.id,b.us_trading_date::text,b.session,b.target_at,j.state FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial' WHERE b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at<$1 ORDER BY b.target_at DESC LIMIT 30",
+        "SELECT b.id,b.us_trading_date::text,b.session,b.target_at,j.state FROM briefings b LEFT JOIN jobs j ON j.briefing_id=b.id AND j.kind='initial' WHERE b.session='post' AND b.published_at IS NULL AND b.missed_at IS NULL AND b.target_at<$1 ORDER BY b.target_at DESC LIMIT 30",
         [now],
       )
     ).rows;
@@ -480,6 +505,8 @@ export class Repository {
           latest.error_code === "SUBMISSION_UNKNOWN"
         )
           throw new Error("RETRY_NOT_AVAILABLE");
+        if (latest.kind === "initial" && b.session === "pre")
+          throw new Error("PRE_PUBLICATION_ENDED");
         if (
           latest.kind === "correction" &&
           latest.payload.baseVersion !== b.current_version_id
@@ -533,7 +560,12 @@ export class Repository {
           await tx.query("SELECT content FROM briefing_versions WHERE id=$1", [
             b.current_version_id,
           ])
-        ).rows[0].content;
+        ).rows[0].content as Content;
+        // A correction to a legacy article must not require rewriting its unrelated clocks.
+        const correctionConfig =
+          config.timePolicy && !old.timePolicy
+            ? { ...config, promptVersion: "noct-v1", timePolicy: undefined }
+            : config;
         await tx.query(
           "INSERT INTO jobs(id,briefing_id,kind,dedupe_key,state,next_at,config,created_at,payload) VALUES($1,$2,'correction',$3,'collecting',$4,$5,$4,$6)",
           [
@@ -541,7 +573,7 @@ export class Repository {
             b.id,
             command.id,
             now,
-            config,
+            correctionConfig,
             {
               baseVersion: b.current_version_id,
               reason: command.reason,

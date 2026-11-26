@@ -2,6 +2,7 @@ import Link from "next/link";
 import { publicData, archive } from "@/lib/queries";
 import { DateTime } from "luxon";
 import { upcoming, kst, sessionLabel } from "@/lib/calendar";
+import { formatMarketTime } from "@/lib/report-time";
 import { BriefingCard } from "@/components/briefing-card";
 import { UiIcon } from "@/components/ui-icon";
 export const dynamic = "force-dynamic";
@@ -48,11 +49,14 @@ export default async function Home({
           {next ? (
             <div>
               <strong>
-                {sessionLabel(next.session)} · {kst(next.targetAt)} KST 예정
+                {sessionLabel(next.session)} · {formatMarketTime(next.targetAt)}{" "}
+                예정
               </strong>
               <small>
                 대상 미국 거래일 {next.date}
-                {next.earlyClose ? " · 조기 폐장일 (13:00 ET)" : ""}
+                {next.earlyClose
+                  ? ` · 조기 폐장 ${formatMarketTime(next.closeAt)}`
+                  : ""}
               </small>
             </div>
           ) : (
